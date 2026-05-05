@@ -75,7 +75,6 @@ For the current private-repo design, Jane should treat the Honor Guard workbook 
 That means:
 
 - the member sheet is the current HG ORBAT-like member state
-- the schedule sheet is the live upcoming-event list
 - the archive sheet is the finished-event history
 - the event-host sheet tracks hosted-event counts and type totals
 
@@ -94,7 +93,7 @@ Do not try to replace Apollo immediately.
 The intended order is:
 
 - make logging work first
-- add archive/schedule cleanup second
+- add archive second
 - only consider full scheduling / announcements later if HG still wants it
 
 Jane's core value here is logging and workflow state, not replacing an existing event scheduler just because one already exists.
@@ -117,7 +116,7 @@ Expected behavior:
 - 30 minutes required
 - evidence attachments required
 - manual review required
-- earns 1 quota point
+- earns 0 quota point
 - earns 1 promotion event point
 
 Do not fully automate acceptance for solo sentry. HG explicitly wants fraud resistance here.
@@ -185,6 +184,9 @@ For exams:
   `2` points even without grading
 - `NCO exam` screen-assist plus grading
   `2` plus personal graded-attendee points
+
+The Host cannot get less Points than Cohosts, so if a cohost gets more by the rules, the Host automaticaly get the same amount.
+Example: NCO Exam with Cohost screen assist and grading 5 People gets 10 while the Host would only get 8
 
 Co-hosts and supervisors should receive points like attendees unless the specific event rule says otherwise.
 
@@ -287,7 +289,6 @@ This is the main event-level object for:
 - host
 - attendee count
 - archive sync
-- schedule removal
 - host-stat updates
 
 ### `hg_quota_cycles`
@@ -308,10 +309,9 @@ When a hosted event is finalized, Jane should:
 
 1. sync the relevant member point deltas
 2. append the event to the archive sheet
-3. remove or mark the event from the schedule sheet
-4. increment the host's event-host stats
+3. increment the host's event-host stats
 
-That archive/schedule/host-stat trio is part of the real workflow, not an optional nice-to-have.
+That archive/host-stat duo is part of the real workflow, not an optional nice-to-have.
 
 ## Permissions
 
@@ -342,7 +342,7 @@ More specifically, the project roadmap implied by the chat is:
 4. event attendance logs next
 5. officer host / co-host / supervisor handling
 6. solo-sentry daily lockout
-7. archive / schedule updates
+7. archive updates
 8. bi-weekly quota reset and status update tooling
 9. promotion-readiness reporting
 10. only after live testing, consider heavier automation like promo automation

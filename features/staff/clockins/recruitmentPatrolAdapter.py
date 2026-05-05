@@ -32,7 +32,7 @@ class RecruitmentPatrolAdapter:
     async def listAttendees(self, sessionId: int) -> list[dict]:
         return await recruitmentService.listRecruitmentPatrolAttendees(int(sessionId))
 
-    async def addAttendee(self, sessionId: int, userId: int) -> None:
+    async def addAttendee(self, sessionId: int, userId: int, **kwargs) -> None:
         await recruitmentService.addRecruitmentPatrolAttendee(int(sessionId), int(userId))
 
     async def removeAttendee(self, sessionId: int, userId: int) -> None:
