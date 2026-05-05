@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 import config
 from db.sqlite import execute, executeReturnId, fetchAll, fetchOne
-from features.staff.sessions.Roblox import roverIdentity
+from features.staff.sessions.Roblox import robloxUsers, roverIdentity
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,7 +29,7 @@ class HonorGuardPointDeltas:
     promotionEventPoints: float = 0
     promotionAwardedPoints: float = 0
     hostedEvents: int = 0
-
+## Probably need changing as we need to track the type of hosted event
 
 @dataclass(slots=True, frozen=True)
 class HonorGuardScaffoldStatus:
@@ -320,30 +320,24 @@ async def createPointAwardSubmission(
     awardedUserId: int,
     reason: str,
     awardedPoints: float = 0,
-    quotaPoints: float = 0,
     awardedUserDisplayName: str = "",
-    targetRobloxUsername: str = "",
-    eventPoints: float = 0,
 ) -> int:
-    awardedDelta = float(awardedPoints or eventPoints or 0)
+    awardedDelta = float(awardedPoints or 0)
     return await createSubmission(
         guildId=int(guildId),
         channelId=int(channelId),
         submitterId=int(submitterId),
         submissionType="POINT_AWARD",
         targetUserId=int(awardedUserId or 0),
-        targetRobloxUsername=str(targetRobloxUsername or "").strip(),
         targetDisplayName=str(awardedUserDisplayName or "").strip(),
         eventType="award",
         eventTitle="Manual Point Award",
         deltas=HonorGuardPointDeltas(
-            quotaPoints=float(quotaPoints or 0),
             promotionAwardedPoints=awardedDelta,
         ),
         metadata={
             "reason": str(reason or "").strip(),
             "awardedPoints": awardedDelta,
-            "quotaPoints": float(quotaPoints or 0),
         },
     )
 
@@ -354,17 +348,6 @@ async def getPointAwardSubmission(submissionId: int) -> Optional[dict[str, Any]]
         return None
     metadata = _jsonDict(submission.get("metadataJson"))
     enriched = dict(submission)
-    targetUserId = int(submission.get("targetUserId") or 0)
-    awardedPoints = float(
-        submission.get("promotionAwardedPoints")
-        or metadata.get("awardedPoints")
-        or metadata.get("eventPoints")
-        or 0
-    )
-    enriched["awardedUserId"] = targetUserId
-    enriched["recruitUserId"] = targetUserId
-    enriched["awardedPoints"] = awardedPoints
-    enriched["eventPoints"] = float(submission.get("promotionEventPoints") or metadata.get("eventPoints") or 0)
     enriched["reason"] = str(metadata.get("reason") or "").strip()
     return enriched
 
@@ -433,7 +416,6 @@ async def createSubmission(
     submitterId: int,
     submissionType: str,
     targetUserId: int = 0,
-    targetRobloxUsername: str = "",
     targetDisplayName: str = "",
     eventType: str = "",
     eventTitle: str = "",
@@ -446,19 +428,18 @@ async def createSubmission(
         """
         INSERT INTO hg_submissions
             (
-                guildId, channelId, submitterId, targetUserId, targetRobloxUsername,
+                guildId, channelId, submitterId, targetUserId,
                 targetDisplayName, submissionType, eventType, eventTitle, eventDate,
                 quotaPoints, promotionEventPoints, promotionAwardedPoints, hostedEvents,
                 metadataJson
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(guildId),
             int(channelId),
             int(submitterId),
             int(targetUserId or 0),
-            str(targetRobloxUsername or "").strip(),
             str(targetDisplayName or "").strip(),
             str(submissionType or "").strip().upper(),
             _eventType(eventType),
@@ -477,12 +458,6 @@ async def createSubmission(
         eventType="CREATED",
         toStatus="PENDING",
         details=metadata,
-    )
-    await _rememberHonorGuardIdentity(
-        userId=int(targetUserId or 0),
-        robloxUsername=targetRobloxUsername,
-        guildId=int(guildId),
-        source="honor-guard-submission",
     )
     return submissionId
 
@@ -565,7 +540,6 @@ async def createPointAward(
     *,
     guildId: int,
     targetUserId: int = 0,
-    targetRobloxUsername: str = "",
     pointType: str,
     points: float,
     reason: str = "",
@@ -578,16 +552,15 @@ async def createPointAward(
         """
         INSERT INTO hg_point_awards
             (
-                submissionId, guildId, targetUserId, targetRobloxUsername, pointType,
+                submissionId, guildId, targetUserId, pointType,
                 points, reason, awardedBy, approvedBy, sheetSynced
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(submissionId or 0),
             int(guildId),
             int(targetUserId or 0),
-            str(targetRobloxUsername or "").strip(),
             _normalizePointType(pointType),
             float(points or 0),
             str(reason or "").strip(),
@@ -595,12 +568,6 @@ async def createPointAward(
             int(approvedBy or 0),
             1 if sheetSynced else 0,
         ),
-    )
-    await _rememberHonorGuardIdentity(
-        userId=int(targetUserId or 0),
-        robloxUsername=targetRobloxUsername,
-        guildId=int(guildId),
-        source="honor-guard-award",
     )
     return awardId
 
@@ -629,18 +596,11 @@ async def ensurePointAwardRecordsForSubmission(
     }
 
     metadata = _jsonDict(submission.get("metadataJson"))
-    quotaPoints = float(submission.get("quotaPoints") or metadata.get("quotaPoints") or 0)
-    awardedPoints = float(
-        submission.get("promotionAwardedPoints")
-        or metadata.get("awardedPoints")
-        or metadata.get("eventPoints")
-        or 0
-    )
+    awardedPoints = int(submission.get("promotionAwardedPoints") or 0)
+
     reason = str(metadata.get("reason") or "").strip()
 
-    desiredRows: list[tuple[str, float]] = []
-    if quotaPoints > 0:
-        desiredRows.append(("QUOTA", quotaPoints))
+    desiredRows: list[tuple[str, int]] = []
     if awardedPoints > 0:
         desiredRows.append(("PROMOTION_AWARDED", awardedPoints))
 
@@ -652,7 +612,6 @@ async def ensurePointAwardRecordsForSubmission(
                 submissionId=submissionId,
                 guildId=int(submission.get("guildId") or 0),
                 targetUserId=int(submission.get("targetUserId") or 0),
-                targetRobloxUsername=str(submission.get("targetRobloxUsername") or "").strip(),
                 pointType=pointType,
                 points=points,
                 reason=reason,
@@ -742,41 +701,32 @@ async def createSentryLog(
     guildId: int,
     userId: int,
     dutyDate: str,
-    robloxUsername: str = "",
     minutes: int = 0,
     submissionId: int = 0,
     status: str = "PENDING",
     configModule: Any = config,
 ) -> int:
-    dutyMinutes = int(minutes or getattr(configModule, "honorGuardSentryDutyMinutesRequired", 30) or 30)
-    quotaPoints = float(getattr(configModule, "honorGuardSentryDutyQuotaPoints", 1) or 1)
-    promotionPoints = float(getattr(configModule, "honorGuardSentryDutyPromotionPoints", 1) or 1)
+    quotaPoints = float(getattr(configModule, "honorGuardSoloSentryDutyQuotaPoints", 0) or 0)
+    promotionPoints = float(getattr(configModule, "honorGuardSoloSentryDutyPromotionPoints", 1) or 1)
     sentryLogId = await executeReturnId(
         """
         INSERT INTO hg_sentry_logs
             (
-                submissionId, guildId, userId, robloxUsername, dutyDate, minutes,
+                submissionId, guildId, userId, dutyDate, minutes,
                 quotaPoints, promotionEventPoints, status
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(submissionId or 0),
             int(guildId),
             int(userId),
-            str(robloxUsername or "").strip(),
             str(dutyDate or "").strip(),
-            dutyMinutes,
+            int(minutes or 0),
             quotaPoints,
             promotionPoints,
             _normalizeStatus(status),
         ),
-    )
-    await _rememberHonorGuardIdentity(
-        userId=int(userId),
-        robloxUsername=robloxUsername,
-        guildId=int(guildId),
-        source="honor-guard-sentry",
     )
     return sentryLogId
 
@@ -796,14 +746,13 @@ async def findExistingSentryLogForDate(*, userId: int, dutyDate: str) -> Optiona
     )
 
 
-async def createSentrySubmission(
+async def createSoloSentrySubmission(
     *,
     guildId: int,
     channelId: int,
     submitterId: int,
     dutyDate: str,
     targetUserId: int = 0,
-    targetRobloxUsername: str = "",
     targetDisplayName: str = "",
     minutes: int = 0,
     imageUrls: list[str] | None = None,
@@ -815,10 +764,9 @@ async def createSentrySubmission(
     if existing is not None:
         raise ValueError("A pending or approved Honor Guard sentry log already exists for that user/date.")
 
-    dutyMinutes = int(minutes or getattr(configModule, "honorGuardSentryDutyMinutesRequired", 30) or 30)
     deltas = HonorGuardPointDeltas(
-        quotaPoints=float(getattr(configModule, "honorGuardSentryDutyQuotaPoints", 1) or 1),
-        promotionEventPoints=float(getattr(configModule, "honorGuardSentryDutyPromotionPoints", 1) or 1),
+        quotaPoints=float(getattr(configModule, "honorGuardSoloSentryDutyQuotaPoints", 0) or 0),
+        promotionEventPoints=float(getattr(configModule, "honorGuardSoloSentryDutyPromotionPoints", 1) or 1),
     )
     submissionId = await createSubmission(
         guildId=guildId,
@@ -826,14 +774,13 @@ async def createSentrySubmission(
         submitterId=submitterId,
         submissionType="SENTRY",
         targetUserId=userId,
-        targetRobloxUsername=targetRobloxUsername,
         targetDisplayName=targetDisplayName,
         eventType="sentry",
         eventTitle="Solo Sentry Duty",
         eventDate=dutyDate,
         deltas=deltas,
         metadata={
-            "minutes": dutyMinutes,
+            "minutes": int(minutes or 0),
             "imageUrls": list(imageUrls or []),
             "evidenceMessageUrl": str(evidenceMessageUrl or "").strip(),
         },
@@ -842,8 +789,7 @@ async def createSentrySubmission(
         guildId=guildId,
         userId=userId,
         dutyDate=dutyDate,
-        robloxUsername=targetRobloxUsername,
-        minutes=dutyMinutes,
+        minutes=minutes,
         submissionId=submissionId,
         status="PENDING",
         configModule=configModule,
@@ -851,7 +797,7 @@ async def createSentrySubmission(
     return submissionId
 
 
-async def getSentrySubmission(submissionId: int) -> Optional[dict[str, Any]]:
+async def getSoloSentrySubmission(submissionId: int) -> Optional[dict[str, Any]]:
     submission = await getSubmission(int(submissionId))
     if submission is None:
         return None
@@ -867,8 +813,6 @@ async def getSentrySubmission(submissionId: int) -> Optional[dict[str, Any]]:
     enriched["minutes"] = int(
         (sentryLog or {}).get("minutes")
         or metadata.get("minutes")
-        or getattr(config, "honorGuardSentryDutyMinutesRequired", 30)
-        or 30
     )
     enriched["imageUrls"] = [
         str(value).strip()
@@ -906,7 +850,7 @@ async def setSentryLogStatus(
     )
 
 
-async def updateSentrySubmissionStatus(
+async def updateSoloSentrySubmissionStatus(
     submissionId: int,
     status: str,
     *,
@@ -1053,11 +997,17 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
             )
         return {"alreadySynced": True, "submissionId": int(submissionId)}
 
+    targetRobloxUsername = await robloxUsers.fetchRobloxUser(
+        int(submission.get("targetUserId") or 0),
+        int(submission.get("guildId") or 0),
+        remember=True,
+    )
+
     from features.staff.honorGuard import sheets as honorGuardSheets
 
     updateResult = honorGuardSheets.applyMemberPointDeltas(
         discordId=int(submission.get("targetUserId") or 0),
-        robloxUsername=str(submission.get("targetRobloxUsername") or "").strip(),
+        robloxUsername=targetRobloxUsername,
         quotaDelta=float(submission.get("quotaPoints") or 0),
         promotionEventDelta=float(submission.get("promotionEventPoints") or 0),
         promotionAwardedDelta=float(submission.get("promotionAwardedPoints") or 0),

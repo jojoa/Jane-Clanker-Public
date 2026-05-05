@@ -98,7 +98,7 @@ Expected behavior:
 - 30 minutes required
 - evidence attachments required
 - manual review required
-- earns 1 quota point
+- earns 0 quota point
 - earns 1 promotion event point
 
 Do not fully automate acceptance for solo sentry. HG explicitly wants fraud resistance here.
@@ -166,6 +166,9 @@ For exams:
   `2` points even without grading
 - `NCO exam` screen-assist plus grading
   `2` plus personal graded-attendee points
+
+The Host cannot get less Points than Cohosts, so if a cohost gets more by the rules, the Host automaticaly get the same amount.
+Example: NCO Exam with Cohost screen assist and grading 5 People gets 10 while the Host would only get 8
 
 Co-hosts and supervisors should receive points like attendees unless the specific event rule says otherwise.
 
@@ -289,10 +292,9 @@ When a hosted event is finalized, Jane should:
 
 1. sync the relevant member point deltas
 2. append the event to the archive sheet
-3. remove or mark the event from the schedule sheet
-4. increment the host's event-host stats
+3. increment the host's event-host stats
 
-That archive/schedule/host-stat trio is part of the real workflow, not an optional nice-to-have.
+That archive/host-stat duo is part of the real workflow, not an optional nice-to-have.
 
 ## Permissions
 

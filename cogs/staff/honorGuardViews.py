@@ -168,15 +168,14 @@ class HonorGuardPointAwardReviewView(discord.ui.View):
                     syncResult = await self._syncApprovedSubmission()
                     submission = await self._getSubmission()
                     if submission:
-                        awardedPoints = submission.get("awardedPoints") or submission.get("promotionAwardedPoints") or 0
-                        quotaPoints = submission.get("quotaPoints") or 0
+                        awardedPoints = submission.get("promotionAwardedPoints") or 0
                         syncStatusText = "already synced" if syncResult.get("alreadySynced") else "synced now"
                         await self._logHonorGuardSheetChange(
                             reviewerId=interaction.user.id,
                             change="Edited Honor Guard points for an approved point award.",
                             details=(
                                 f"User: <@{int(submission.get('awardedUserId') or 0)}> | "
-                                f"Points +{awardedPoints} AP, +{quotaPoints} QP | "
+                                f"Points +{awardedPoints} AP | "
                                 f"Reason: {submission.get('reason') or 'N/A'} | "
                                 f"Sheet: {syncStatusText}"
                             ),
@@ -236,7 +235,7 @@ class HonorGuardPointAwardReviewView(discord.ui.View):
         await self._finishDecision(interaction, status="REJECTED", note=None)
 
 
-class HonorGuardSentryReviewView(discord.ui.View):
+class HonorGuardSoloSentryReviewView(discord.ui.View):
     def __init__(self, cog: "HonorGuardCog", submissionId: int):
         super().__init__(timeout=None)
         self.cog = cog
@@ -244,7 +243,7 @@ class HonorGuardSentryReviewView(discord.ui.View):
         self._lock = asyncio.Lock()
 
     async def _getSubmission(self) -> Optional[dict]:
-        return await honorGuardService.getSentrySubmission(self.submissionId)
+        return await honorGuardService.getSoloSentrySubmission(self.submissionId)
 
     def _canReview(self, member: discord.Member) -> bool:
         reviewerRoleId = int(getattr(config, "honorGuardReviewerRoleId", 0) or 0)
@@ -262,7 +261,7 @@ class HonorGuardSentryReviewView(discord.ui.View):
         note: Optional[str],
         threadId: Optional[int],
     ) -> None:
-        await honorGuardService.updateSentrySubmissionStatus(
+        await honorGuardService.updateSoloSentrySubmissionStatus(
             self.submissionId,
             status,
             reviewerId=reviewerId,
@@ -291,7 +290,7 @@ class HonorGuardSentryReviewView(discord.ui.View):
         submission = await self._getSubmission()
         if not submission:
             return None
-        return honorGuardRendering.buildSentrySubmissionEmbed(submission)
+        return honorGuardRendering.buildSoloSentrySubmissionEmbed(submission)
 
     async def _finishDecision(
         self,

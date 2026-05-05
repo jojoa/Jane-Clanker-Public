@@ -420,9 +420,9 @@ honorGuardExcuseStatusValues = [
 ]
 honorGuardBiweeklyQuotaPointsRequired = 4
 honorGuardEarlyActiveQuotaPoints = 8
-honorGuardSentryDutyMinutesRequired = 30
-honorGuardSentryDutyQuotaPoints = 1
-honorGuardSentryDutyPromotionPoints = 1
+honorGuardSoloSentryDutyMinutesRequired = 30
+honorGuardSoloSentryDutyQuotaPoints = 0
+honorGuardSoloSentryDutyPromotionPoints = 1
 honorGuardAttendanceQuotaPointsByEventType = {
     "gamenight": 0.5,
 }

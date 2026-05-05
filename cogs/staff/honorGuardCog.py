@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from cogs.staff.honorGuardViews import HonorGuardPointAwardReviewView, HonorGuardSentryReviewView
+from cogs.staff.honorGuardViews import HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView
 from features.staff.honorGuard import buildScaffoldStatus
 from features.staff.honorGuard import rendering as honorGuardRendering
 from features.staff.honorGuard import service as honorGuardService
@@ -71,7 +71,9 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    def _canAwardPoints(self, member: discord.Member) -> bool:
+    def _canAwardPoints(self, member: discord.Member, awarded_user: discord.Member) -> bool:
+        if member.id == awarded_user.id:
+            return True
         honorGuardReviewerRoleId = int(getattr(config, "honorGuardReviewerRoleId", 0) or 0)
         if honorGuardReviewerRoleId <= 0:
             return True
@@ -181,12 +183,10 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     )
     @app_commands.describe(
         awarded_user="User you want to award",
-        quota_points="Quota Points you want to award",
         awarded_points="Awarded promotion points you want to award",
         reason="The reason for the award",
     )
     @app_commands.rename(awarded_user="awarded-user")
-    @app_commands.rename(quota_points="quota-points")
     @app_commands.rename(awarded_points="awarded-points")
     async def honorGuardAwardPoints(
         self,
@@ -194,7 +194,6 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         awarded_user: discord.Member,
         reason: str,
         awarded_points: float,
-        quota_points: float = 0.0,
     ) -> None:
         if not await self._ensureHonorGuardCommandGuild(interaction):
             return
@@ -204,31 +203,25 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 "This command can only be used in a server channel.",
             )
             return
-        if not self._canAwardPoints(interaction.user):
+        if not self._canAwardPoints(interaction.user, awarded_user):
             await self._safeReply(
                 interaction,
                 "You do not have permission to award Honor Guard points.",
             )
             return
-        if float(awarded_points or 0) < 0 or float(quota_points or 0) < 0:
+        if float(awarded_points or 0) <= 0 :
             await self._safeReply(
                 interaction,
-                "Honor Guard point awards cannot be negative.",
+                "Honor Guard point awards cannot be zero or negative.",
             )
             return
-        if float(awarded_points or 0) <= 0 and float(quota_points or 0) <= 0:
-            await self._safeReply(
-                interaction,
-                "Set at least one positive point value before submitting the award.",
-            )
-            return
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         submissionId = await honorGuardService.createPointAwardSubmission(
             guildId=int(interaction.guild.id),
             channelId=int(interaction.channel.id),
             submitterId=int(interaction.user.id),
             awardedUserId=int(awarded_user.id),
-            quotaPoints=float(quota_points or 0),
             awardedPoints=float(awarded_points or 0),
             reason=str(reason or "").strip(),
             awardedUserDisplayName=self._memberDisplayName(awarded_user),
@@ -269,18 +262,15 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     )
     @app_commands.describe(
         duty_date="Duty date in YYYY-MM-DD format.",
-        roblox_username="Your Roblox username as it appears on the HG ORBAT.",
         image="Primary sentry screenshot.",
         extra_image="Second sentry screenshot.",
     )
     @app_commands.rename(duty_date="duty-date")
-    @app_commands.rename(roblox_username="roblox-username")
     @app_commands.rename(extra_image="extra-image")
     async def honorGuardSoloSentry(
         self,
         interaction: discord.Interaction,
         duty_date: str,
-        roblox_username: str,
         image: discord.Attachment,
         extra_image: discord.Attachment,
     ) -> None:
@@ -328,12 +318,11 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             return
 
         try:
-            submissionId = await honorGuardService.createSentrySubmission(
+            submissionId = await honorGuardService.createSoloSentrySubmission(
                 guildId=int(interaction.guild.id),
                 channelId=int(interaction.channel.id),
                 submitterId=int(interaction.user.id),
                 targetUserId=int(interaction.user.id),
-                targetRobloxUsername=str(roblox_username or "").strip(),
                 targetDisplayName=self._memberDisplayName(interaction.user),
                 dutyDate=normalizedDutyDate,
                 imageUrls=imageUrls,
@@ -345,7 +334,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             )
             return
 
-        submission = await honorGuardService.getSentrySubmission(submissionId)
+        submission = await honorGuardService.getSoloSentrySubmission(submissionId)
         if not submission:
             await interaction.followup.send(
                 "Failed to create solo sentry submission.",
@@ -353,8 +342,8 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             )
             return
 
-        embed = honorGuardRendering.buildSentrySubmissionEmbed(submission)
-        view = HonorGuardSentryReviewView(self, submissionId)
+        embed = honorGuardRendering.buildSoloSentrySubmissionEmbed(submission)
+        view = HonorGuardSoloSentryReviewView(self, submissionId)
         reviewMessage = await self._postHonorGuardForReview(
             guild=interaction.guild,
             fallbackChannel=interaction.channel,

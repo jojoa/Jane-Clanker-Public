@@ -42,12 +42,7 @@ def _clip(text: str, limit: int = 1024) -> str:
 
 
 def buildPointAwardEmbed(submission: Mapping[str, Any]) -> discord.Embed:
-    awardedUserId = (
-        submission.get("awardedUserId")
-        or submission.get("targetUserId")
-        or submission.get("recruitUserId")
-        or 0
-    )
+    awardedUserId = submission.get("targetUserId") or 0
     reason = str(submission.get("reason") or "").strip() or "_No reason provided._"
     embed = discord.Embed(
         title="Honor Guard Point Award",
@@ -55,10 +50,9 @@ def buildPointAwardEmbed(submission: Mapping[str, Any]) -> discord.Embed:
     )
     embed.add_field(name="Awarder", value=_mentionUser(submission.get("submitterId")), inline=False)
     embed.add_field(name="Awarded User", value=_mentionUser(awardedUserId), inline=False)
-    embed.add_field(name="Quota Points", value=_formatPoints(submission.get("quotaPoints")), inline=True)
     embed.add_field(
         name="Awarded Promotion Points",
-        value=_formatPoints(submission.get("awardedPoints")),
+        value=_formatPoints(submission.get("promotionAwardedPoints")),
         inline=True,
     )
     embed.add_field(name="Reason", value=reason, inline=False)
@@ -66,7 +60,7 @@ def buildPointAwardEmbed(submission: Mapping[str, Any]) -> discord.Embed:
     return embed
 
 
-def buildSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Embed:
+def buildSoloSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Embed:
     targetUserId = submission.get("targetUserId") or 0
     dutyDate = str(submission.get("eventDate") or "").strip() or "Unknown"
     minutes = int(submission.get("minutes") or 0)
