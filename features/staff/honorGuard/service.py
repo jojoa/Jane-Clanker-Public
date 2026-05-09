@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import config
 from db.sqlite import execute, executeReturnId, fetchAll, fetchOne
@@ -18,7 +18,6 @@ class HonorGuardConfig:
     archiveChannelId: int
     spreadsheetId: str
     memberSheetName: str
-    scheduleSheetName: str
     archiveSheetName: str
     eventHostsSheetName: str
 
@@ -28,8 +27,6 @@ class HonorGuardPointDeltas:
     quotaPoints: float = 0
     promotionEventPoints: float = 0
     promotionAwardedPoints: float = 0
-    hostedEvents: int = 0
-## Probably need changing as we need to track the type of hosted event
 
 @dataclass(slots=True, frozen=True)
 class HonorGuardScaffoldStatus:
@@ -205,7 +202,6 @@ def calculatePointDeltas(
 
     quotaPoints = 0.0
     promotionEventPoints = 0.0
-    hostedEvents = 0
 
     attendanceEligible = group in {"enlisted", "nco"}
     officerLike = group in {"officer", "nco", ""}
@@ -218,7 +214,6 @@ def calculatePointDeltas(
             promotionEventPoints = _attendancePromotionPoints(configModule, normalizedEvent) or 8
 
     elif normalizedRole == "host":
-        hostedEvents = 1
         if officerLike:
             hostMap = _configuredPointMap(configModule, "honorGuardOfficerHostPromotionPointsByEventType")
             promotionEventPoints = float(hostMap.get(normalizedEvent, 0))
@@ -259,7 +254,6 @@ def calculatePointDeltas(
         quotaPoints=float(quotaPoints),
         promotionEventPoints=float(promotionEventPoints),
         promotionAwardedPoints=max(0.0, float(promotionAwardedPoints or 0)),
-        hostedEvents=int(hostedEvents),
     )
 
 
@@ -271,7 +265,6 @@ def loadHonorGuardConfig(*, configModule: Any) -> HonorGuardConfig:
         archiveChannelId=_normalizePositiveInt(getattr(configModule, "honorGuardArchiveChannelId", 0)),
         spreadsheetId=str(getattr(configModule, "honorGuardSpreadsheetId", "") or "").strip(),
         memberSheetName=str(getattr(configModule, "honorGuardMemberSheetName", "") or "").strip(),
-        scheduleSheetName=str(getattr(configModule, "honorGuardScheduleSheetName", "") or "").strip(),
         archiveSheetName=str(getattr(configModule, "honorGuardArchiveSheetName", "") or "").strip(),
         eventHostsSheetName=str(getattr(configModule, "honorGuardEventHostsSheetName", "") or "").strip(),
     )
@@ -305,12 +298,20 @@ def buildScaffoldStatus(*, configModule: Any) -> HonorGuardScaffoldStatus:
         nextMilestones=(
             "Build the command/view review flow on top of hg_submissions.",
             "Call syncApprovedSubmissionToSheet after reviewer approval.",
-            "Live-test member row lookup and archive/schedule handling against the HG spreadsheet.",
+            "Live-test member row lookup and archive handling against the HG spreadsheet.",
             "Add bi-weekly quota reset automation after sheet columns are confirmed.",
         ),
         sheetProblems=sheetProblems,
     )
 
+
+async def listPointAwardPendingStatuses() -> List[Dict]:
+    return []
+    ##TODO
+    
+async def listSoloSentryPendingStatuses() -> List[Dict]:
+    return []
+    ##TODO 
 
 async def createPointAwardSubmission(
     *,
@@ -430,10 +431,10 @@ async def createSubmission(
             (
                 guildId, channelId, submitterId, targetUserId,
                 targetDisplayName, submissionType, eventType, eventTitle, eventDate,
-                quotaPoints, promotionEventPoints, promotionAwardedPoints, hostedEvents,
+                quotaPoints, promotionEventPoints, promotionAwardedPoints,
                 metadataJson
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(guildId),
@@ -448,7 +449,6 @@ async def createSubmission(
             float(pointDeltas.quotaPoints),
             float(pointDeltas.promotionEventPoints),
             float(pointDeltas.promotionAwardedPoints),
-            int(pointDeltas.hostedEvents),
             _jsonText(metadata),
         ),
     )
@@ -655,6 +655,7 @@ async def createAttendanceRecord(
     approvedBy: int = 0,
     submissionId: int = 0,
 ) -> int:
+    ##NOT USED ATM
     pointDeltas = deltas or HonorGuardPointDeltas()
     recordId = await executeReturnId(
         """
@@ -663,9 +664,9 @@ async def createAttendanceRecord(
                 submissionId, guildId, eventType, eventTitle, eventDate, targetUserId,
                 targetRobloxUsername, participationRole, memberGroup, attendeeCount,
                 gradedAttendeeCount, assistedScreens, quotaPoints, promotionEventPoints,
-                hostedEvents, createdBy, approvedBy
+                 createdBy, approvedBy
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(submissionId or 0),
@@ -682,7 +683,6 @@ async def createAttendanceRecord(
             1 if assistedScreens else 0,
             float(pointDeltas.quotaPoints),
             float(pointDeltas.promotionEventPoints),
-            int(pointDeltas.hostedEvents),
             int(createdBy or 0),
             int(approvedBy or 0),
         ),
@@ -696,7 +696,7 @@ async def createAttendanceRecord(
     return recordId
 
 
-async def createSentryLog(
+async def createSoloSentryLog(
     *,
     guildId: int,
     userId: int,
@@ -706,14 +706,13 @@ async def createSentryLog(
     status: str = "PENDING",
     configModule: Any = config,
 ) -> int:
-    quotaPoints = float(getattr(configModule, "honorGuardSoloSentryDutyQuotaPoints", 0) or 0)
     promotionPoints = float(getattr(configModule, "honorGuardSoloSentryDutyPromotionPoints", 1) or 1)
     sentryLogId = await executeReturnId(
         """
         INSERT INTO hg_sentry_logs
             (
                 submissionId, guildId, userId, dutyDate, minutes,
-                quotaPoints, promotionEventPoints, status
+                promotionEventPoints, status
             )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -723,7 +722,6 @@ async def createSentryLog(
             int(userId),
             str(dutyDate or "").strip(),
             int(minutes or 0),
-            quotaPoints,
             promotionPoints,
             _normalizeStatus(status),
         ),
@@ -756,7 +754,6 @@ async def createSoloSentrySubmission(
     targetDisplayName: str = "",
     minutes: int = 0,
     imageUrls: list[str] | None = None,
-    evidenceMessageUrl: str = "",
     configModule: Any = config,
 ) -> int:
     userId = int(targetUserId or submitterId)
@@ -765,7 +762,6 @@ async def createSoloSentrySubmission(
         raise ValueError("A pending or approved Honor Guard sentry log already exists for that user/date.")
 
     deltas = HonorGuardPointDeltas(
-        quotaPoints=float(getattr(configModule, "honorGuardSoloSentryDutyQuotaPoints", 0) or 0),
         promotionEventPoints=float(getattr(configModule, "honorGuardSoloSentryDutyPromotionPoints", 1) or 1),
     )
     submissionId = await createSubmission(
@@ -782,10 +778,9 @@ async def createSoloSentrySubmission(
         metadata={
             "minutes": int(minutes or 0),
             "imageUrls": list(imageUrls or []),
-            "evidenceMessageUrl": str(evidenceMessageUrl or "").strip(),
         },
     )
-    await createSentryLog(
+    await createSoloSentryLog(
         guildId=guildId,
         userId=userId,
         dutyDate=dutyDate,
@@ -819,7 +814,6 @@ async def getSoloSentrySubmission(submissionId: int) -> Optional[dict[str, Any]]
         for value in metadata.get("imageUrls", [])
         if str(value).strip()
     ] if isinstance(metadata.get("imageUrls"), list) else []
-    enriched["evidenceMessageUrl"] = str(metadata.get("evidenceMessageUrl") or "").strip()
     enriched["sentryLogId"] = int((sentryLog or {}).get("sentryLogId") or 0)
     return enriched
 
@@ -893,6 +887,7 @@ async def createEventRecord(
     createdBy: int = 0,
     submissionId: int = 0,
 ) -> int:
+    ##NOT USED ATM
     return await executeReturnId(
         """
         INSERT INTO hg_event_records
@@ -918,6 +913,7 @@ async def createEventRecord(
 
 
 async def getEventRecord(eventRecordId: int) -> Optional[dict[str, Any]]:
+    ##NOT USED ATM
     return await fetchOne(
         "SELECT * FROM hg_event_records WHERE eventRecordId = ?",
         (int(eventRecordId),),
@@ -925,6 +921,7 @@ async def getEventRecord(eventRecordId: int) -> Optional[dict[str, Any]]:
 
 
 async def syncEventRecordToSheets(eventRecordId: int) -> dict[str, Any]:
+    ##NOT USED ATM
     record = await getEventRecord(int(eventRecordId))
     if record is None:
         raise ValueError(f"Honor Guard event record not found: {eventRecordId}")
@@ -939,7 +936,7 @@ async def syncEventRecordToSheets(eventRecordId: int) -> dict[str, Any]:
     eventType = str(record.get("eventType") or "").strip()
     eventTitle = str(record.get("eventTitle") or "").strip()
     eventDetail = str(metadata.get("eventDetail") or eventTitle).strip()
-    syncResult = honorGuardSheets.archiveEventAndRemoveSchedule(
+    honorGuardSheets.archiveEvent(
         honorGuardSheets.HonorGuardArchiveRecord(
             eventType=eventType,
             eventTimeUtc=str(record.get("eventDate") or "").strip(),
@@ -957,20 +954,9 @@ async def syncEventRecordToSheets(eventRecordId: int) -> dict[str, Any]:
     eventHostUpdate = None
     if hostText:
         eventHostUpdate = honorGuardSheets.incrementEventHostStats(host=hostText, eventType=eventType)
-    scheduleRemoval = syncResult.get("scheduleRemoval")
-    await execute(
-        """
-        UPDATE hg_event_records
-        SET archiveSynced = 1,
-            scheduleRemoved = ?
-        WHERE eventRecordId = ?
-        """,
-        (1 if scheduleRemoval is not None else 0, int(eventRecordId)),
-    )
     return {
         "eventRecordId": int(eventRecordId),
         "archiveSynced": True,
-        "scheduleRemoval": scheduleRemoval,
         "eventHostUpdate": eventHostUpdate,
     }
 
@@ -1011,7 +997,6 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
         quotaDelta=float(submission.get("quotaPoints") or 0),
         promotionEventDelta=float(submission.get("promotionEventPoints") or 0),
         promotionAwardedDelta=float(submission.get("promotionAwardedPoints") or 0),
-        hostedEventsDelta=int(submission.get("hostedEvents") or 0),
     )
     await execute(
         """
@@ -1057,6 +1042,5 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
         "promotionEventPoints": updateResult.promotionEventPoints,
         "promotionAwardedPoints": updateResult.promotionAwardedPoints,
         "promotionTotalPoints": updateResult.promotionTotalPoints,
-        "hostedEvents": updateResult.hostedEvents,
         "activityStatus": updateResult.activityStatus,
     }

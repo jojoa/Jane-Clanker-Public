@@ -1145,7 +1145,6 @@ async def initDb():
             quotaPoints REAL NOT NULL DEFAULT 0,
             promotionEventPoints REAL NOT NULL DEFAULT 0,
             promotionAwardedPoints REAL NOT NULL DEFAULT 0,
-            hostedEvents INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'PENDING',
             reviewerId INTEGER NOT NULL DEFAULT 0,
             reviewNote TEXT NOT NULL DEFAULT '',
@@ -1204,9 +1203,7 @@ async def initDb():
             assistedScreens INTEGER NOT NULL DEFAULT 0,
             quotaPoints REAL NOT NULL DEFAULT 0,
             promotionEventPoints REAL NOT NULL DEFAULT 0,
-            hostedEvents INTEGER NOT NULL DEFAULT 0,
             archiveSynced INTEGER NOT NULL DEFAULT 0,
-            scheduleRemoved INTEGER NOT NULL DEFAULT 0,
             createdBy INTEGER NOT NULL DEFAULT 0,
             approvedBy INTEGER NOT NULL DEFAULT 0,
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1221,7 +1218,6 @@ async def initDb():
             robloxUsername TEXT NOT NULL DEFAULT '',
             dutyDate TEXT NOT NULL,
             minutes INTEGER NOT NULL DEFAULT 30,
-            quotaPoints REAL NOT NULL DEFAULT 1,
             promotionEventPoints REAL NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'PENDING',
             reviewerId INTEGER NOT NULL DEFAULT 0,
@@ -1258,7 +1254,6 @@ async def initDb():
             hostRobloxUsername TEXT NOT NULL DEFAULT '',
             attendeeCount INTEGER NOT NULL DEFAULT 0,
             archiveSynced INTEGER NOT NULL DEFAULT 0,
-            scheduleRemoved INTEGER NOT NULL DEFAULT 0,
             metadataJson TEXT NOT NULL DEFAULT '{}',
             createdBy INTEGER NOT NULL DEFAULT 0,
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))

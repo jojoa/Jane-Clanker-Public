@@ -71,6 +71,29 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
+    async def cog_load(self) -> None:
+        await self._restoreReviewViews()
+
+    async def _restoreReviewViews(self) -> None:
+        pointAwardRows = await honorGuardService.listPointAwardPendingStatuses()
+        for row in pointAwardRows:
+            messageId = int(row.get("messageId") or 0)
+            if messageId <= 0:
+                continue
+            self.bot.add_view(
+                HonorGuardPointAwardReviewView(self, int(row["submissionId"])),
+                message_id=messageId,
+            )
+        soloSentryRows = await honorGuardService.listSoloSentryPendingStatuses()
+        for row in soloSentryRows:
+            messageId = int(row.get("messageId") or 0)
+            if messageId <= 0:
+                continue
+            self.bot.add_view(
+                HonorGuardSoloSentryReviewView(self, int(row["submissionId"])),
+                message_id=messageId,
+            )
+
     def _canAwardPoints(self, member: discord.Member, awarded_user: discord.Member) -> bool:
         if member.id == awarded_user.id:
             return True
@@ -149,7 +172,6 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             f"Archive channel: {_displayChannel(status.config.archiveChannelId)}",
             f"Spreadsheet: {_displayText(status.config.spreadsheetId)}",
             f"Member sheet: {_displayText(status.config.memberSheetName)}",
-            f"Schedule sheet: {_displayText(status.config.scheduleSheetName)}",
             f"Archive sheet: {_displayText(status.config.archiveSheetName)}",
             f"Event hosts sheet: {_displayText(status.config.eventHostsSheetName)}",
         ]
@@ -183,7 +205,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     )
     @app_commands.describe(
         awarded_user="User you want to award",
-        awarded_points="Awarded promotion points you want to award",
+        awarded_points="Amount of points you want to award",
         reason="The reason for the award",
     )
     @app_commands.rename(awarded_user="awarded-user")

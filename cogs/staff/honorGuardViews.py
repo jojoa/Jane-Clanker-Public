@@ -221,7 +221,7 @@ class HonorGuardPointAwardReviewView(discord.ui.View):
     @discord.ui.button(
         label="Approve",
         style=discord.ButtonStyle.success,
-        custom_id="honorGuard_review:approve",
+        custom_id="honorGuard_award_review:approve",
     )
     async def approveBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._finishDecision(interaction, status="APPROVED", note=None)
@@ -229,7 +229,7 @@ class HonorGuardPointAwardReviewView(discord.ui.View):
     @discord.ui.button(
         label="Reject",
         style=discord.ButtonStyle.danger,
-        custom_id="honorGuard_review:reject",
+        custom_id="honorGuard_award_review:reject",
     )
     async def rejectBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._finishDecision(interaction, status="REJECTED", note=None)

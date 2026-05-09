@@ -65,7 +65,6 @@ def buildSoloSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Emb
     dutyDate = str(submission.get("eventDate") or "").strip() or "Unknown"
     minutes = int(submission.get("minutes") or 0)
     imageUrls = submission.get("imageUrls") or []
-    evidenceMessageUrl = str(submission.get("evidenceMessageUrl") or "").strip()
 
     embed = discord.Embed(
         title="Honor Guard Solo Sentry",
@@ -75,15 +74,12 @@ def buildSoloSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Emb
     embed.add_field(name="Member", value=_mentionUser(targetUserId), inline=False)
     embed.add_field(name="Duty Date", value=f"`{dutyDate}`", inline=True)
     embed.add_field(name="Minutes", value=f"`{minutes}`", inline=True)
-    embed.add_field(name="Quota Points", value=_formatPoints(submission.get("quotaPoints")), inline=True)
     embed.add_field(
         name="Promotion Event Points",
         value=_formatPoints(submission.get("promotionEventPoints")),
         inline=True,
     )
-    if evidenceMessageUrl:
-        embed.add_field(name="Evidence Message", value=f"[Open message]({evidenceMessageUrl})", inline=False)
-    elif isinstance(imageUrls, list) and imageUrls:
+    if isinstance(imageUrls, list) and imageUrls:
         preview = "\n".join(
             f"[Screenshot {index + 1}]({str(url).strip()})"
             for index, url in enumerate(imageUrls[:6])

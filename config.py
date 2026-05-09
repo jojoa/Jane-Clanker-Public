@@ -330,7 +330,6 @@ honorGuardSpreadsheetId = _envText(
     "1aLD68JNA2nRjTxG1c3DZOtb_DPRXE4uNKN7ZxpKo_0k",
 )
 honorGuardMemberSheetName = "Main"
-honorGuardScheduleSheetName = "Event Scheduling"
 honorGuardArchiveSheetName = "Event Archive"
 honorGuardEventHostsSheetName = "Event Hosts"
 honorGuardCredentialsPathEnvVar = "ORBAT_GOOGLE_CREDENTIALS_PATH"
@@ -345,7 +344,6 @@ honorGuardQuotaPointsColumn = "E"
 honorGuardPromotionEventPointsColumn = "K"
 honorGuardPromotionAwardedPointsColumn = "L"
 honorGuardPromotionTotalPointsColumn = ""
-honorGuardHostedEventsColumn = ""
 honorGuardJuniorExamPassedColumn = "N"
 honorGuardNcoExamPassedColumn = "O"
 honorGuardQuotaCompleteFormulaColumn = "G"
@@ -353,15 +351,6 @@ honorGuardPromotionEligibleFormulaColumn = "P"
 honorGuardStrikesColumn = "Q"
 
 # Honor Guard schedule/archive sheet columns.
-honorGuardScheduleEventIdColumn = ""
-honorGuardScheduleEventTypeColumn = "A"
-honorGuardScheduleEventTimeColumn = "B"
-honorGuardScheduleHostColumn = "C"
-honorGuardScheduleCoHostsColumn = "D"
-honorGuardScheduleSupervisorsColumn = "E"
-honorGuardScheduleEventDetailColumn = "F"
-honorGuardScheduleNotesColumn = "G"
-honorGuardScheduleStatusColumn = ""
 honorGuardArchiveColumns = [
     "eventType",
     "eventTimeUtc",
@@ -421,7 +410,6 @@ honorGuardExcuseStatusValues = [
 honorGuardBiweeklyQuotaPointsRequired = 4
 honorGuardEarlyActiveQuotaPoints = 8
 honorGuardSoloSentryDutyMinutesRequired = 30
-honorGuardSoloSentryDutyQuotaPoints = 0
 honorGuardSoloSentryDutyPromotionPoints = 1
 honorGuardAttendanceQuotaPointsByEventType = {
     "gamenight": 0.5,
@@ -802,7 +790,6 @@ multiOrbatSheets = [
                 "promotionEvent": honorGuardPromotionEventPointsColumn,
                 "promotionAwarded": honorGuardPromotionAwardedPointsColumn,
                 "promotionTotal": honorGuardPromotionTotalPointsColumn,
-                "hostedEvents": honorGuardHostedEventsColumn,
             },
             "profileColumns": {
                 "rank": honorGuardRankColumn,
@@ -813,18 +800,6 @@ multiOrbatSheets = [
         "organization": {
             "enabled": honorGuardEnabled,
             "supportsSectionHeaders": True,
-        },
-    },
-    {
-        "key": "honorGuard_schedule",
-        "displayName": "Honor Guard Event Schedule",
-        "spreadsheetId": honorGuardSpreadsheetId,
-        "sheetName": honorGuardScheduleSheetName,
-        "credentialsPathEnvVar": honorGuardCredentialsPathEnvVar,
-        "credentialsPathConfigKey": honorGuardCredentialsPathConfigKey,
-        "organization": {
-            "enabled": honorGuardEnabled,
-            "supportsSectionHeaders": False,
         },
     },
     {

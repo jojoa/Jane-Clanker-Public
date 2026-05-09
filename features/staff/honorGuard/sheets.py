@@ -9,7 +9,6 @@ from features.staff.orbat.multiEngine import getMultiOrbatEngine
 
 
 _memberSheetKey = "honorGuard_members"
-_scheduleSheetKey = "honorGuard_schedule"
 _archiveSheetKey = "honorGuard_archive"
 _eventHostsSheetKey = "honorGuard_eventHosts"
 _engine = getMultiOrbatEngine()
@@ -25,7 +24,6 @@ class HonorGuardMemberColumns:
     promotionEventPoints: str
     promotionAwardedPoints: str
     promotionTotalPoints: str
-    hostedEvents: str
     juniorExamPassed: str
     ncoExamPassed: str
 
@@ -41,7 +39,6 @@ class HonorGuardMemberRow:
     promotionEventPoints: float
     promotionAwardedPoints: float
     promotionTotalPoints: float
-    hostedEvents: int
     juniorExamPassed: str
     ncoExamPassed: str
 
@@ -58,8 +55,6 @@ class HonorGuardMemberPointUpdate:
     promotionAwardedPoints: float
     previousPromotionTotalPoints: float
     promotionTotalPoints: float
-    previousHostedEvents: int
-    hostedEvents: int
     activityStatus: str
 
 
@@ -76,12 +71,6 @@ class HonorGuardArchiveRecord:
     attendeeCount: int = 0
     notes: str = ""
     eventId: str = ""
-
-
-@dataclass(slots=True, frozen=True)
-class HonorGuardScheduleRemovalResult:
-    row: int
-    action: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -142,7 +131,7 @@ def _sheetAvailable(sheetKey: str) -> bool:
 def configuredSheetKeys() -> tuple[str, ...]:
     return tuple(
         key
-        for key in (_memberSheetKey, _scheduleSheetKey, _archiveSheetKey, _eventHostsSheetKey)
+        for key in (_memberSheetKey, _archiveSheetKey, _eventHostsSheetKey)
         if _sheetAvailable(key)
     )
 
@@ -155,16 +144,12 @@ def configurationProblems(*, configModule: Any = config) -> tuple[str, ...]:
         problems.append("honorGuardSpreadsheetId is not set")
     if not str(getattr(configModule, "honorGuardMemberSheetName", "") or "").strip():
         problems.append("honorGuardMemberSheetName is not set")
-    if not str(getattr(configModule, "honorGuardScheduleSheetName", "") or "").strip():
-        problems.append("honorGuardScheduleSheetName is not set")
     if not str(getattr(configModule, "honorGuardArchiveSheetName", "") or "").strip():
         problems.append("honorGuardArchiveSheetName is not set")
     if not str(getattr(configModule, "honorGuardEventHostsSheetName", "") or "").strip():
         problems.append("honorGuardEventHostsSheetName is not set")
     if not _sheetAvailable(_memberSheetKey):
         problems.append("Honor Guard member sheet is not registered")
-    if not _sheetAvailable(_scheduleSheetKey):
-        problems.append("Honor Guard schedule sheet is not registered")
     if not _sheetAvailable(_archiveSheetKey):
         problems.append("Honor Guard archive sheet is not registered")
     if not _sheetAvailable(_eventHostsSheetKey):
@@ -182,7 +167,6 @@ def loadMemberColumns(*, configModule: Any = config) -> HonorGuardMemberColumns:
         promotionEventPoints=_normalizeColumn(getattr(configModule, "honorGuardPromotionEventPointsColumn", "F")),
         promotionAwardedPoints=_normalizeColumn(getattr(configModule, "honorGuardPromotionAwardedPointsColumn", "G")),
         promotionTotalPoints=_normalizeColumn(getattr(configModule, "honorGuardPromotionTotalPointsColumn", "H")),
-        hostedEvents=_normalizeColumn(getattr(configModule, "honorGuardHostedEventsColumn", "I")),
         juniorExamPassed=_normalizeColumn(getattr(configModule, "honorGuardJuniorExamPassedColumn", "J")),
         ncoExamPassed=_normalizeColumn(getattr(configModule, "honorGuardNcoExamPassedColumn", "K")),
     )
@@ -198,7 +182,6 @@ def _columnMap(columns: HonorGuardMemberColumns) -> dict[str, str]:
         "promotionEventPoints": columns.promotionEventPoints,
         "promotionAwardedPoints": columns.promotionAwardedPoints,
         "promotionTotalPoints": columns.promotionTotalPoints,
-        "hostedEvents": columns.hostedEvents,
         "juniorExamPassed": columns.juniorExamPassed,
         "ncoExamPassed": columns.ncoExamPassed,
     }
@@ -290,7 +273,6 @@ def readMember(
         promotionEventPoints=promotionEvent,
         promotionAwardedPoints=promotionAwarded,
         promotionTotalPoints=promotionTotal,
-        hostedEvents=_toInt(values.get("hostedEvents")),
         juniorExamPassed=str(values.get("juniorExamPassed") or "").strip(),
         ncoExamPassed=str(values.get("ncoExamPassed") or "").strip(),
     )
@@ -311,7 +293,6 @@ def applyMemberPointDeltas(
     quotaDelta: float = 0,
     promotionEventDelta: float = 0,
     promotionAwardedDelta: float = 0,
-    hostedEventsDelta: int = 0,
     markActiveWhenEarlyQuotaMet: bool = True,
     configModule: Any = config,
 ) -> HonorGuardMemberPointUpdate:
@@ -325,7 +306,6 @@ def applyMemberPointDeltas(
     nextPromotionEvent = max(0.0, float(member.promotionEventPoints) + float(promotionEventDelta or 0))
     nextPromotionAwarded = max(0.0, float(member.promotionAwardedPoints) + float(promotionAwardedDelta or 0))
     nextPromotionTotal = nextPromotionEvent + nextPromotionAwarded
-    nextHostedEvents = max(0, int(member.hostedEvents) + int(hostedEventsDelta or 0))
 
     status = member.activityStatus
     earlyQuota = float(getattr(configModule, "honorGuardEarlyActiveQuotaPoints", 8) or 8)
@@ -346,8 +326,6 @@ def applyMemberPointDeltas(
         updates["promotionAwardedPoints"] = (columns.promotionAwardedPoints, _pointValue(nextPromotionAwarded))
     if columns.promotionTotalPoints:
         updates["promotionTotalPoints"] = (columns.promotionTotalPoints, _pointValue(nextPromotionTotal))
-    if columns.hostedEvents:
-        updates["hostedEvents"] = (columns.hostedEvents, nextHostedEvents)
     if columns.activityStatus and status != member.activityStatus:
         updates["activityStatus"] = (columns.activityStatus, status)
 
@@ -363,13 +341,11 @@ def applyMemberPointDeltas(
         promotionAwardedPoints=nextPromotionAwarded,
         previousPromotionTotalPoints=member.promotionTotalPoints,
         promotionTotalPoints=nextPromotionTotal,
-        previousHostedEvents=member.hostedEvents,
-        hostedEvents=nextHostedEvents,
         activityStatus=status,
     )
 
 
-def appendArchiveRecord(record: HonorGuardArchiveRecord, *, configModule: Any = config) -> dict[str, Any]:
+def archiveEvent(record: HonorGuardArchiveRecord, *, configModule: Any = config) -> dict[str, Any]:
     columns = list(getattr(configModule, "honorGuardArchiveColumns", []) or [])
     if not columns:
         columns = [
@@ -402,134 +378,6 @@ def appendArchiveRecord(record: HonorGuardArchiveRecord, *, configModule: Any = 
         rangeA1=f"{_sheetName(_archiveSheetKey)}!A:A",
         values=[rowValues],
     )
-
-
-def _scheduleColumn(name: str, default: str, *, configModule: Any = config) -> str:
-    return _normalizeColumn(getattr(configModule, name, default))
-
-
-def _findScheduleRow(
-    *,
-    eventId: str = "",
-    eventTitle: str = "",
-    eventType: str = "",
-    eventTimeUtc: str = "",
-    host: str = "",
-    configModule: Any = config,
-) -> Optional[int]:
-    eventIdColumn = _scheduleColumn("honorGuardScheduleEventIdColumn", "A", configModule=configModule)
-    eventTypeColumn = _scheduleColumn("honorGuardScheduleEventTypeColumn", "A", configModule=configModule)
-    eventTimeColumn = _scheduleColumn("honorGuardScheduleEventTimeColumn", "B", configModule=configModule)
-    hostColumn = _scheduleColumn("honorGuardScheduleHostColumn", "C", configModule=configModule)
-    eventDetailColumn = _scheduleColumn("honorGuardScheduleEventDetailColumn", "F", configModule=configModule)
-    if str(eventId or "").strip() and eventIdColumn:
-        row = _findRowByNormalizedValue(
-            _scheduleSheetKey,
-            columnLetter=eventIdColumn,
-            value=eventId,
-            normalizer=lambda raw: str(raw or "").strip().casefold(),
-        )
-        if row:
-            return row
-
-    typeKey = _normalizeKey(eventType or eventTitle)
-    timeKey = str(eventTimeUtc or "").strip().casefold()
-    hostKey = _normalizeUsername(host)
-    detailKey = _normalizeKey(eventTitle)
-    if not typeKey:
-        return None
-    eventTypes = _readColumn(_scheduleSheetKey, eventTypeColumn)
-    eventTimes = _readColumn(_scheduleSheetKey, eventTimeColumn) if timeKey else []
-    hosts = _readColumn(_scheduleSheetKey, hostColumn) if hostKey else []
-    details = _readColumn(_scheduleSheetKey, eventDetailColumn) if detailKey else []
-    for index, currentEventType in enumerate(eventTypes, start=1):
-        if _normalizeKey(currentEventType) != typeKey:
-            continue
-        if timeKey:
-            currentTime = eventTimes[index - 1] if index - 1 < len(eventTimes) else ""
-            if str(currentTime or "").strip().casefold() != timeKey:
-                continue
-        if hostKey:
-            currentHost = hosts[index - 1] if index - 1 < len(hosts) else ""
-            if _normalizeUsername(currentHost) != hostKey:
-                continue
-        if detailKey:
-            currentDetail = details[index - 1] if index - 1 < len(details) else ""
-            if _normalizeKey(currentDetail) != detailKey:
-                continue
-        return index
-    return None
-
-
-def removeScheduledEvent(
-    *,
-    eventId: str = "",
-    eventTitle: str = "",
-    eventType: str = "",
-    eventTimeUtc: str = "",
-    host: str = "",
-    configModule: Any = config,
-) -> Optional[HonorGuardScheduleRemovalResult]:
-    row = _findScheduleRow(
-        eventId=eventId,
-        eventTitle=eventTitle,
-        eventType=eventType,
-        eventTimeUtc=eventTimeUtc,
-        host=host,
-        configModule=configModule,
-    )
-    if row is None:
-        return None
-
-    statusColumn = _scheduleColumn("honorGuardScheduleStatusColumn", "", configModule=configModule)
-    if statusColumn:
-        _engine.writeRowColumns(
-            _scheduleSheetKey,
-            row=row,
-            columnValues={"status": (statusColumn, "Archived")},
-        )
-        return HonorGuardScheduleRemovalResult(row=row, action="marked_archived")
-
-    sheetId = _engine.getSheetTabId(_scheduleSheetKey)
-    _engine.batchUpdateRequests(
-        _scheduleSheetKey,
-        [
-            {
-                "deleteDimension": {
-                    "range": {
-                        "sheetId": sheetId,
-                        "dimension": "ROWS",
-                        "startIndex": row - 1,
-                        "endIndex": row,
-                    }
-                }
-            }
-        ],
-    )
-    return HonorGuardScheduleRemovalResult(row=row, action="deleted")
-
-
-def archiveEventAndRemoveSchedule(
-    record: HonorGuardArchiveRecord,
-    *,
-    removeFromSchedule: bool = True,
-    configModule: Any = config,
-) -> dict[str, Any]:
-    archiveResult = appendArchiveRecord(record, configModule=configModule)
-    removalResult = None
-    if removeFromSchedule:
-        removalResult = removeScheduledEvent(
-            eventId=record.eventId,
-            eventTitle=record.eventTitle,
-            eventType=record.eventType,
-            eventTimeUtc=record.eventTimeUtc,
-            host=record.host,
-            configModule=configModule,
-        )
-    return {
-        "archiveResult": archiveResult,
-        "scheduleRemoval": removalResult,
-    }
 
 
 def _eventHostColumnForEventType(eventType: str, *, configModule: Any = config) -> str:

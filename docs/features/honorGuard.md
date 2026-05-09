@@ -56,7 +56,6 @@ For the current private-repo design, Jane should treat the Honor Guard workbook 
 That means:
 
 - the member sheet is the current HG ORBAT-like member state
-- the schedule sheet is the live upcoming-event list
 - the archive sheet is the finished-event history
 - the event-host sheet tracks hosted-event counts and type totals
 
@@ -75,7 +74,7 @@ Do not try to replace Apollo immediately.
 The intended order is:
 
 - make logging work first
-- add archive/schedule cleanup second
+- add archive second
 - only consider full scheduling / announcements later if HG still wants it
 
 Jane's core value here is logging and workflow state, not replacing an existing event scheduler just because one already exists.
@@ -271,7 +270,6 @@ This is the main event-level object for:
 - host
 - attendee count
 - archive sync
-- schedule removal
 - host-stat updates
 
 ### `hg_quota_cycles`
@@ -325,7 +323,7 @@ More specifically, the project roadmap implied by the chat is:
 4. event attendance logs next
 5. officer host / co-host / supervisor handling
 6. solo-sentry daily lockout
-7. archive / schedule updates
+7. archive updates
 8. bi-weekly quota reset and status update tooling
 9. promotion-readiness reporting
 10. only after live testing, consider heavier automation like promo automation
