@@ -33,7 +33,7 @@ class OrientationClockinAdapter:
     async def listAttendees(self, sessionId: int) -> list[dict]:
         return await sessionService.getAttendees(int(sessionId))
 
-    async def addAttendee(self, sessionId: int, userId: int) -> None:
+    async def addAttendee(self, sessionId: int, userId: int, **kwargs) -> None:
         await sessionService.addAttendee(int(sessionId), int(userId))
 
     async def removeAttendee(self, sessionId: int, userId: int) -> None:

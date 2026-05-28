@@ -53,7 +53,7 @@ class ClockinAdapter(Protocol):
 
     async def listAttendees(self, sessionId: int) -> list[dict]: ...
 
-    async def addAttendee(self, sessionId: int, userId: int) -> None: ...
+    async def addAttendee(self, sessionId: int, userId: int, **kwargs) -> None: ...
 
     async def removeAttendee(self, sessionId: int, userId: int) -> None: ...
 
@@ -94,8 +94,8 @@ class ClockinEngine:
     async def listAttendees(self, sessionId: int) -> list[dict]:
         return await self.adapter.listAttendees(sessionId)
 
-    async def addAttendee(self, sessionId: int, userId: int) -> None:
-        await self.adapter.addAttendee(sessionId, userId)
+    async def addAttendee(self, sessionId: int, userId: int, **kwargs) -> None:
+        await self.adapter.addAttendee(sessionId, userId, **kwargs)
 
     async def removeAttendee(self, sessionId: int, userId: int) -> None:
         await self.adapter.removeAttendee(sessionId, userId)

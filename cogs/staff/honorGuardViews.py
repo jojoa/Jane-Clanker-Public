@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 from typing import Optional
 
@@ -15,7 +16,7 @@ from runtime import permissions as runtimePermissions
 
 
 log = logging.getLogger(__name__)
-
+joinButtonEmoji = "\N{WHITE HEAVY CHECK MARK}"
 
 def _hasRole(member: discord.Member, roleId: Optional[int]) -> bool:
     return runtimePermissions.hasAnyRole(member, [roleId])
@@ -174,7 +175,7 @@ class HonorGuardPointAwardReviewView(discord.ui.View):
                             reviewerId=interaction.user.id,
                             change="Edited Honor Guard points for an approved point award.",
                             details=(
-                                f"User: <@{int(submission.get('awardedUserId') or 0)}> | "
+                                f"User: <@{int(submission.get('targetUserId') or 0)}> | "
                                 f"Points +{awardedPoints} AP | "
                                 f"Reason: {submission.get('reason') or 'N/A'} | "
                                 f"Sheet: {syncStatusText}"
@@ -415,3 +416,85 @@ class HonorGuardSoloSentryReviewView(discord.ui.View):
     )
     async def rejectBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._finishDecision(interaction, status="REJECTED", note=None)
+
+
+class HonorGuardEventView(discord.ui.View):
+    def __init__(self, cog: "HonorGuardCog", eventId: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.eventId = int(eventId)
+
+    @discord.ui.button(
+        label="Delete",
+        style=discord.ButtonStyle.danger,
+        row=0,
+        custom_id="honorguard_event:delete",
+    )
+    async def deleteBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.handleEventDelete(interaction, self.eventId)
+
+    @discord.ui.button(
+        label="Manage",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="honorguard_event:manage",
+    )
+    async def manageBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.openEventManage(interaction, self.eventId)
+
+    @discord.ui.button(
+        label="Finish",
+        style=discord.ButtonStyle.primary,
+        row=0,
+        custom_id="honorguard_event:finish",
+    )
+    async def finishBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.openEventFinish(interaction, self.eventId)
+
+    @discord.ui.button(
+        style=discord.ButtonStyle.success,
+        emoji=joinButtonEmoji,
+        row=1,
+        custom_id="honorguard_event:join",
+    )
+    async def joinBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.handleEventJoin(interaction, self.eventId)
+
+class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
+    durationMinutesInput = discord.ui.TextInput(
+        label="Event duration (minutes)",
+        style=discord.TextStyle.short,
+        required=True,
+        max_length=5,
+        placeholder="Example: 45",
+    )
+
+    def __init__(self, cog: "HonorGuardCog", eventId: int):
+        super().__init__()
+        self.cog = cog
+        self.eventId = int(eventId)
+        event = honorGuardService.getEventRecord(self.eventId)
+        startedAt = event.get("startedAt") if event else datetime.now(datetime.timezone.utc)
+        finishedAt = datetime.now(datetime.timezone.utc)
+        duration = finishedAt - startedAt
+        minutes = int(duration.total_seconds() // 60)
+        self.durationMinutesInput.default = minutes
+        self.durationMinutesInput.placeholder = f"Default: {minutes}"
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.durationMinutesInput.value or "").strip()
+        try:
+            durationMinutes = int(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                "Duration must be a whole number of minutes.",
+                ephemeral=True,
+            )
+            return
+        if durationMinutes <= 0:
+            await interaction.response.send_message(
+                "Duration must be greater than 0 minutes.",
+                ephemeral=True,
+            )
+            return
+        await self.cog.handleEventFinish(interaction, self.eventId, durationMinutes)

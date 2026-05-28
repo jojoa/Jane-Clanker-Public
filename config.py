@@ -163,6 +163,7 @@ anrorsRmPlusRoleId = 0  # ANRORS RM+
 # Honor Guard roles.
 honorGuardReviewerRoleId = 0
 honorGuardReviewerPingRoleId = 0
+honorGuardParadeOfficerPlusRoleIds = []  # Parade Officer+ roles for promotion eligibility and point awards
 
 # ANRD role placeholders (for future role -> ORBAT rank sync).
 anrdRoleProbationaryId = 0
@@ -344,11 +345,11 @@ honorGuardQuotaPointsColumn = "E"
 honorGuardPromotionEventPointsColumn = "K"
 honorGuardPromotionAwardedPointsColumn = "L"
 honorGuardPromotionTotalPointsColumn = ""
-honorGuardJuniorExamPassedColumn = "N"
-honorGuardNcoExamPassedColumn = "O"
+honorGuardJuniorExamPassedColumn = "O"
+honorGuardNcoExamPassedColumn = "P"
 honorGuardQuotaCompleteFormulaColumn = "G"
-honorGuardPromotionEligibleFormulaColumn = "P"
-honorGuardStrikesColumn = "Q"
+honorGuardPromotionEligibleFormulaColumn = "Q"
+honorGuardStrikesColumn = "R"
 
 # Honor Guard schedule/archive sheet columns.
 honorGuardArchiveColumns = [
@@ -383,22 +384,10 @@ honorGuardEventHostEventTypeColumns = {
 }
 
 # Honor Guard ranks and point rules.
-honorGuardEnlistedRanks = [
-    "Jr Guardsman",
-    "Junior Guardsman",
-    "Guardsman",
-]
-honorGuardNcoRanks = [
-    "Sr Guardsman",
-    "Senior Guardsman",
-    "Patrol Sergeant",
-]
-honorGuardOfficerRanks = [
-    "Parade Officer",
-    "Senior Parade Officer",
-    "Honor Guard Officer",
-    "Commanding Officer",
-]
+honorGuardEnlistedRoleIds = []
+honorGuardNcoRoleIds = []
+honorGuardOfficerRoleIds = []
+
 honorGuardExcuseStatusValues = [
     "Excused",
     "LoA",
@@ -418,7 +407,7 @@ honorGuardAttendancePromotionPointsByEventType = {
     "inspection": 8,
     "sentry": 1,
 }
-honorGuardOfficerHostPromotionPointsByEventType = {
+honorGuardHostPromotionPointsByEventType = {
     "gamenight": 1,
     "orientation": 2,
     "training": 3,
@@ -426,11 +415,8 @@ honorGuardOfficerHostPromotionPointsByEventType = {
     "tryout": 6,
     "inspection": 8,
 }
-honorGuardOfficerSupervisorPromotionPointsByEventType = {
+honorGuardSupervisorPromotionPointsByEventType = {
     "orientation": 2,
-}
-honorGuardOfficerCohostPromotionPointsByEventType = {
-    "inspection": 8,
 }
 honorGuardJgePointsPerGradedAttendee = 0.75
 honorGuardNcoExamPointsPerGradedAttendee = 1.5

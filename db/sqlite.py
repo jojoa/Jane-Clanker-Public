@@ -1191,21 +1191,16 @@ async def initDb():
             recordId INTEGER PRIMARY KEY AUTOINCREMENT,
             submissionId INTEGER NOT NULL DEFAULT 0,
             guildId INTEGER NOT NULL,
-            eventType TEXT NOT NULL,
-            eventTitle TEXT NOT NULL DEFAULT '',
-            eventDate TEXT NOT NULL DEFAULT '',
+            eventRecordId INTEGER NOT NULL,
             targetUserId INTEGER NOT NULL DEFAULT 0,
-            targetRobloxUsername TEXT NOT NULL DEFAULT '',
             participationRole TEXT NOT NULL DEFAULT 'ATTENDEE',
             memberGroup TEXT NOT NULL DEFAULT '',
-            attendeeCount INTEGER NOT NULL DEFAULT 0,
             gradedAttendeeCount INTEGER NOT NULL DEFAULT 0,
             assistedScreens INTEGER NOT NULL DEFAULT 0,
             quotaPoints REAL NOT NULL DEFAULT 0,
             promotionEventPoints REAL NOT NULL DEFAULT 0,
             archiveSynced INTEGER NOT NULL DEFAULT 0,
             createdBy INTEGER NOT NULL DEFAULT 0,
-            approvedBy INTEGER NOT NULL DEFAULT 0,
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
@@ -1246,15 +1241,17 @@ async def initDb():
         CREATE TABLE IF NOT EXISTS hg_event_records (
             eventRecordId INTEGER PRIMARY KEY AUTOINCREMENT,
             submissionId INTEGER NOT NULL DEFAULT 0,
+            messageId INTEGER NOT NULL DEFAULT 0,
             guildId INTEGER NOT NULL,
             eventType TEXT NOT NULL,
             eventTitle TEXT NOT NULL DEFAULT '',
             eventDate TEXT NOT NULL DEFAULT '',
             hostUserId INTEGER NOT NULL DEFAULT 0,
-            hostRobloxUsername TEXT NOT NULL DEFAULT '',
             attendeeCount INTEGER NOT NULL DEFAULT 0,
             archiveSynced INTEGER NOT NULL DEFAULT 0,
-            metadataJson TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'OPEN', -- OPEN/FINISHED/SUBMITTED/CANCELED
+            startedAt TEXT,
+            finishedAt TEXT,
             createdBy INTEGER NOT NULL DEFAULT 0,
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
