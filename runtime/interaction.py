@@ -136,6 +136,17 @@ async def safeMessageEdit(message: discord.Message, **kwargs: Any) -> bool:
         return False
 
 
+async def safeInteractionEditOriginalResponse(interaction: discord.Interaction, **kwargs: Any) -> bool:
+    try:
+        await taskBudgeter.runInteractionAck(lambda: interaction.edit_original_response(**kwargs))
+        return True
+    except _SAFE_DISCORD_EXCEPTIONS as exc:
+        if isUnknownInteractionError(exc):
+            _logSafeFailure("interaction edit", exc)
+            return False
+        raise
+
+
 async def safeMessageDelete(message: discord.Message) -> bool:
     try:
         await taskBudgeter.runDiscord(lambda: message.delete())
@@ -143,6 +154,17 @@ async def safeMessageDelete(message: discord.Message) -> bool:
     except _SAFE_MESSAGE_DELETE_EXCEPTIONS as exc:
         _logSafeFailure("message delete", exc)
         return False
+    
+
+async def safeInteractionDeleteOriginalResponse(interaction: discord.Interaction) -> bool:
+    try:
+        await taskBudgeter.runInteractionAck(lambda: interaction.delete_original_response())
+        return True
+    except _SAFE_DISCORD_EXCEPTIONS as exc:
+        if isUnknownInteractionError(exc):
+            _logSafeFailure("interaction delete", exc)
+            return False
+        raise
 
 
 async def safeChannelSend(channel: Any, **kwargs: Any) -> discord.Message | None:

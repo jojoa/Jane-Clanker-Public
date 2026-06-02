@@ -5,6 +5,7 @@ import re
 
 from datetime import date
 from typing import Optional, Sequence
+from uuid import uuid4
 
 import discord
 from discord import app_commands
@@ -12,7 +13,7 @@ from discord.app_commands import Choice
 from discord.ext import commands
 
 import config
-from cogs.staff.honorGuardViews import HonorGuardEventFinishModal, HonorGuardEventView, HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView
+from cogs.staff.honorGuardViews import HonorGuardEventFinishModal, HonorGuardEventSubmitView, HonorGuardEventView, HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView, HonorGuardEventManageView, HonorGuardEditCohostsModal, HonorGuardEditSupervisorsModal, HonorGuardRemoveAttendeesModal
 from features.staff.clockins.engine import ClockinEngine
 from features.staff.clockins.honorGuardAdapter import HonorGuardAdapter
 from features.staff.honorGuard import buildScaffoldStatus
@@ -30,6 +31,22 @@ PLUGIN_MANIFEST = {
 }
 
 _userIdRegex = re.compile(r"\d{15,22}")
+
+_originalInteractions: dict[int, discord.Interaction] = {}
+
+def _saveOriginalInteraction(managementId: int, interaction: discord.Interaction) -> None:
+    _originalInteractions[managementId] = interaction
+
+def _deleteOriginalInteraction(managementId: int) -> None:
+    if managementId in _originalInteractions:
+        del _originalInteractions[managementId]
+
+def _getOriginalInteraction(managementId: int) -> Optional[discord.Interaction]:
+    return _originalInteractions.get(managementId)
+
+def _setManagementIdForMessage() -> int:
+    return uuid4()
+
 
 def _displayChannel(channelId: int) -> str:
     return f"<#{channelId}>" if int(channelId or 0) > 0 else "`not set`"
@@ -600,7 +617,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         else:
             attendees = await self._clockInEngine.listAttendees(int(event.get("eventId") or 0))
             for attendee in attendees:
-                if attendee.get("participantRole") == "COHOST" and int(attendee.get("userId") or 0) == interaction.user.id:
+                if attendee.get("participantRole") == "COHOST" or attendee.get("participantRole") == "SUPERVISOR" and int(attendee.get("userId") or 0) == interaction.user.id:
                     return True
         return False
 
@@ -616,6 +633,18 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             viewFactory=lambda sessionId: HonorGuardEventView(self, sessionId),
             message=message,
         )
+    # set up only for ephemeral editing UI
+    async def _updateEventMessageViaInteraction(
+        self,
+        eventId: int,
+        *,
+        interaction: discord.Interaction,
+    ) -> None:
+        await self._clockInEngine.updateClockinViaInteraction(
+            int(eventId),
+            interaction,
+            viewFactory=lambda sessionId: HonorGuardEventManageView(self, sessionId),
+        )
 
     async def _refreshEventMessageFromInteraction(
         self,
@@ -626,6 +655,16 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             await self._updateEventMessage(eventId, message=interaction.message)
             return
         await self._updateEventMessage(eventId)
+
+    async def _refreshEventMessageViaInteraction(
+        self,
+        eventId: int,
+        interaction: discord.Interaction,
+    ) -> None:
+        if isinstance(interaction.message, discord.Message):
+            await self._updateEventMessageViaInteraction(eventId, interaction=interaction)
+            return
+        await self._updateEventMessageViaInteraction(eventId, interaction=interaction)
 
     async def _deleteEventClockinMessage(
         self,
@@ -747,15 +786,215 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         if not attendees:
             await interaction.response.send_message("No attendees to manage.", ephemeral=True)
             return
-
-        enbed = buildEventManageEmbed(event, attendees, durationMinutes) 
+        managementId = _setManagementIdForMessage()
+        _saveOriginalInteraction(managementId, interaction)
+        enbed = self._clockInAdapter.buildEventManageEmbed(event, attendees)
         await interactionRuntime.safeInteractionReply(
             interaction,
             embed=enbed,
-            view=EventManageView,
+            view=HonorGuardEventManageView(),
             ephemeral=True,
         )
-        
+
+    async def openEditCohosts(self, interaction: discord.Interaction, eventId: int,) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can edit co-hosts.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        cohosts = [attendee for attendee in attendees if attendee.get("participantRole") == "COHOST"]
+        cohostText = ", ".join(cohost.get('userId') for cohost in cohosts)
+        modal = HonorGuardEditCohostsModal(self, eventId, cohostText)
+        await interactionRuntime.safeInteractionSendModal(interaction, modal)
+
+    async def handleEditCohosts(self, interaction: discord.Interaction, eventId: int, newCohosts: str, managementId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can edit co-hosts.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+
+        newCohostIds = _parseUserIdList(newCohosts)
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        currentCohosts = {attendee.get("userId"): attendee for attendee in attendees if attendee.get("participantRole") == "COHOST"}
+        for userId in newCohostIds:
+            if userId in currentCohosts:
+                continue
+            if userId in attendees:
+                await self._clockInEngine.removeAttendee(int(eventId), userId)
+            await self._clockInEngine.addAttendee(eventId, userId, participantRole="COHOST")
+        for userId, attendee in currentCohosts.items():
+            if userId in newCohostIds:
+                continue
+            await self._clockInEngine.removeAttendee(int(attendee.get("targetUserId") or 0))
+        await interaction.response.send_message("Co-host list updated.", ephemeral=True)
+        original_interaction = _getOriginalInteraction(managementId)
+        await self._updateEventMessageViaInteraction(eventId, original_interaction)
+
+    async def openEditSupervisors(self, interaction: discord.Interaction, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can edit supervisors.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        supervisors = [attendee for attendee in attendees if attendee.get("participantRole") == "SUPERVISOR"]
+        supervisorText = ", ".join(supervisor.get('userId') for supervisor in supervisors)
+        modal = HonorGuardEditSupervisorsModal(self, eventId, supervisorText)
+        await interactionRuntime.safeInteractionSendModal(interaction, modal)
+
+    async def handleEditSupervisors(self, interaction: discord.Interaction, eventId: int, newSupervisors: str, managementId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can edit supervisors.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+
+        newSupervisorIds = _parseUserIdList(newSupervisors)
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        currentSupervisors = {attendee.get("userId"): attendee for attendee in attendees if attendee.get("participantRole") == "SUPERVISOR"}
+        for userId in newSupervisorIds:
+            if userId in currentSupervisors:
+                continue
+            if userId in attendees:
+                await self._clockInEngine.removeAttendee(int(eventId), userId)
+            await self._clockInEngine.addAttendee(eventId, userId, participantRole="SUPERVISOR")
+        for userId, attendee in currentSupervisors.items():
+            if userId in newSupervisorIds:
+                continue
+            await self._clockInEngine.removeAttendee(int(attendee.get("targetUserId") or 0))
+        await interaction.response.send_message("Supervisor list updated.", ephemeral=True)
+        original_interaction = _getOriginalInteraction(managementId)
+        await self._refreshEventMessageViaInteraction(eventId, original_interaction)
+
+    async def openRemoveAttendees(self, interaction: discord.Interaction, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can remove attendees.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+
+        modal = HonorGuardRemoveAttendeesModal(self, eventId)
+        await interactionRuntime.safeInteractionSendModal(interaction, modal)
+
+    async def handleRemoveAttendees(self, interaction: discord.Interaction, eventId: int, removeAttendeeIds: str, managementId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can remove attendees.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+
+        removeUserIds = _parseUserIdList(removeAttendeeIds)
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        text = ""
+        for userId in removeUserIds:
+            attendee = next((att for att in attendees if int(att.get("userId") or 0) == userId), None)
+            if attendee is None:
+                text += f"<@{userId}> is not an attendee of this event.\n"
+                continue
+            if attendee.get("participantRole") == "SUPERVISOR" or attendee.get("participantRole") == "COHOST":
+                text += f"<@{userId}> is a {attendee.get('participantRole')} and cannot be removed as an attendee. Edit their role instead.\n"
+                continue
+            await self._clockInEngine.removeAttendee(int(eventId), userId)
+            if "Attendees removed." not in text:
+                text += "Attendees removed.\n"
+        if text:
+            await interaction.response.send_message(text, ephemeral=True)
+        else:
+            await interaction.response.send_message("Attendees removed.", ephemeral=True)
+        _original_interaction = _getOriginalInteraction(managementId)
+        await self._refreshEventMessageViaInteraction(eventId, _original_interaction)
+
+    async def closeEventManage(self, interaction: discord.Interaction, eventId: int, managementId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can manage attendees.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+        _original_interaction = _getOriginalInteraction(managementId)
+        await self._refreshEventMessageFromInteraction(eventId, _original_interaction)
+        await _original_interaction.message.delete()
+        _deleteOriginalInteraction(managementId)
+        await interaction.response.send_message("Closed attendee management.", ephemeral=True)
+    
+    async def cancelEventManage(self, interaction: discord.Interaction, eventId: int, managementId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can manage attendees.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+        _original_interaction = _getOriginalInteraction(managementId)
+        await _original_interaction.message.delete()
+        _deleteOriginalInteraction(managementId)
+        await interaction.response.send_message("Changes discarded.", ephemeral=True)
+
     async def openEventFinish(self, interaction: discord.Interaction, eventId: int) -> None:
         event = await self._clockInEngine.getSession(int(eventId))
         if not event:
@@ -771,6 +1010,8 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             await interaction.response.send_message("This event is not open.", ephemeral=True)
             return
 
+        await self._clockInEngine.updateSessionStatus(int(eventId), {"status": "SUBMITTING"})
+
         if str(event.get("eventType") or "").lower() in ("jge", "nco_exam"):
             await interaction.response.send_message(
                 "Not implemented yet",
@@ -783,7 +1024,37 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 HonorGuardEventFinishModal(self, eventId),
             )
 
-    async def handleEventFinish(
+    async def openSubmitEvent(self, interaction: discord.Interaction, eventId: int, durationMinutes: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await interaction.response.send_message("This event session no longer exists.", ephemeral=True)
+            return
+        if not await self._canManageEvent(interaction, event):
+            await interaction.response.send_message(
+                "Only the event host and supervisors can submit this event.",
+                ephemeral=True,
+            )
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await interaction.response.send_message("This event is not open.", ephemeral=True)
+            return
+
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        if not attendees:
+            await interaction.response.send_message("No attendees found for this event.", ephemeral=True)
+            return
+        submitMessageId = _setManagementIdForMessage()
+        _saveOriginalInteraction(submitMessageId, interaction)
+        enbed = self._clockInAdapter.buildSubmitEmbed(event, attendees)
+        view = HonorGuardEventSubmitView(self, eventId)
+        await interactionRuntime.safeInteractionReply(
+            interaction,
+            embed=enbed,
+            view=view,
+            ephemeral=True,
+        )
+
+    async def handleEventSubmit(
         self,
         interaction: discord.Interaction,
         eventId: int,
@@ -818,11 +1089,11 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 honorGuardService.updateAttendeePoints(int(attendee.get("attendanceId") or 0), points)
             ## Disable Clock-in Buttons and update message to prevent new attendees and signal pending submission   
 
-            enbed = buildEventFinishEmbed(event, attendees, durationMinutes) 
+            enbed = self._clockInAdapter.buildEventFinishEmbed(event, attendees, durationMinutes) 
             await interactionRuntime.safeInteractionReply(
                 interaction,
                 embed=enbed,
-                view=EventFinishView,
+                view=HonorGuardEventFinishView,
                 ephemeral=True,
             )
 

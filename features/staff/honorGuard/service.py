@@ -656,11 +656,11 @@ async def createAttendanceRecord(
         (
             int(eventRecordId),
             int(targetUserId),
-            _participationRole(participationRole).upper(),
+            _participationRole(participationRole.upper(),
             str(memberGroup or "").strip().upper(),
             int(createdBy or 0),
         ),
-    )
+    ))
     return recordId
 
 async def removeAttendanceRecord(
@@ -923,7 +923,7 @@ async def setEventRecordMessageId(eventRecordId: int, messageId: int) -> None:
 
 
 async def updateEventRecordStatus(eventRecordId: int, status: str) -> None:
-    if status in {"FINISHED", "CANCELED"}:
+    if status in {"CANCELED", "SUBMITTING", "GRADING"}:
         await execute(
             "UPDATE hg_event_records SET status = ?, finishedAt = datetime('now') WHERE eventRecordId = ?",
             (status, eventRecordId),

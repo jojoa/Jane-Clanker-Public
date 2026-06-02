@@ -53,6 +53,15 @@ def _setAllButtonsDisabled(view: discord.ui.View, disabled: bool) -> None:
         if isinstance(child, discord.ui.Button):
             child.disabled = disabled
 
+async def _disableIfLocked(self):
+    session = await self._clockInEngine.getSession(self.sessionId)
+    if session and session.get("status") in {"FINISHED", "CANCELED"}:
+        _setAllButtonsDisabled(self, True)
+    if session and session.get("status") in {"GRADING", "SUBMITTING"}:
+        self.joinBtn.disabled = True
+    if session and session.get("status") in {"OPEN"}:
+        _setAllButtonsDisabled(self, False)
+
 
 class HonorGuardPointAwardReviewView(discord.ui.View):
     def __init__(self, cog: "HonorGuardCog", submissionId: int):
@@ -460,6 +469,39 @@ class HonorGuardEventView(discord.ui.View):
     async def joinBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.handleEventJoin(interaction, self.eventId)
 
+class HonorGuardEventSubmitView(discord.ui.View):
+    def __init__(self, cog: "HonorGuardCog", eventId: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.eventId = int(eventId)
+
+    @discord.ui.button(
+        label="Points",
+        style=discord.ButtonStyle.primary,
+        row=0,
+        custom_id="honorguard_event_submit:points",
+    )
+    async def pointsBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.openEditPoints(interaction, self.eventId)
+
+    @discord.ui.button(
+        label="Submit",
+        style=discord.ButtonStyle.success,
+        row=0,
+        custom_id="honorguard_event_submit:submit",
+    )
+    async def submitBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.handleEventFinish(interaction, self.eventId)
+    
+    @discord.ui.button(
+        label="Submit",
+        style=discord.ButtonStyle.success,
+        row=0,
+        custom_id="honorguard_event_submit:submit",
+    )
+    async def submitBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.handleEventSubmit(interaction, self.eventId)
+
 class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
     durationMinutesInput = discord.ui.TextInput(
         label="Event duration (minutes)",
@@ -475,10 +517,10 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
         self.eventId = int(eventId)
         event = honorGuardService.getEventRecord(self.eventId)
         startedAt = event.get("startedAt") if event else datetime.now(datetime.timezone.utc)
-        finishedAt = datetime.now(datetime.timezone.utc)
+        finishedAt = event.get("finishedAt") if event else datetime.now(datetime.timezone.utc)
         duration = finishedAt - startedAt
         minutes = int(duration.total_seconds() // 60)
-        self.durationMinutesInput.default = minutes
+        self.durationMinutesInput.default = str(minutes)
         self.durationMinutesInput.placeholder = f"Default: {minutes}"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -497,4 +539,159 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
                 ephemeral=True,
             )
             return
-        await self.cog.handleEventFinish(interaction, self.eventId, durationMinutes)
+        await self.cog.openSubmitEvent(interaction, self.eventId, durationMinutes)
+
+class HonorGuardEventManageView(discord.ui.View):
+    def __init__(self, cog: "HonorGuardCog", eventId: int, managementId: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.eventId = int(eventId)
+        self.managementId = int(managementId)
+
+        @discord.ui.button(
+            label="Edit Cohosts",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id="honorguard_event_manage:edit_cohosts",
+        )
+        async def editCohostsBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
+            await self.cog.openEditCohosts(interaction, self.eventId, self.managementId)
+
+        @discord.ui.button(
+            label="Edit Supervisors",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id="honorguard_event_manage:edit_supervisors",
+        )
+        async def editSupervisorsBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
+            await self.cog.openEditSupervisors(interaction, self.eventId, self.managementId)
+
+        @discord.ui.button(
+            label="Remove Attendees",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            custom_id="honorguard_event_manage:remove_attendees",
+        )
+        async def removeAttendeesBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
+            await self.cog.openRemoveAttendees(interaction, self.eventId, self.managementId)
+
+        @discord.ui.button(
+            label="Done",
+            style=discord.ButtonStyle.primary,
+            row=1,
+            custom_id="honorguard_event_manage:done",
+        )
+        async def doneBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
+            await self.cog.closeEventManage(interaction, self.eventId, self.managementId)
+        
+        @discord.ui.button(
+            label="Cancel",
+            style=discord.ButtonStyle.danger,
+            row=1,
+            custom_id="honorguard_event_manage:cancel_changes",
+        )
+        async def cancelChangesBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
+            await self.cog.cancelEventManage(interaction, self.eventId, self.managementId)
+
+class HonorGuardEditCohostsModal(discord.ui.Modal, title="Edit Cohosts"):
+    def __init__(self, cog: "HonorGuardCog", eventId: int, cohostText: str, managementId: int):
+        super().__init__()
+        self.cog = cog
+        self.eventId = int(eventId)
+        self.cohostText = cohostText
+        self.managementId = int(managementId)
+
+        self.cohostsInput = discord.ui.TextInput(
+            label="Cohost user IDs (comma-separated)",
+            style=discord.TextStyle.short,
+            required=False,
+            default=self.cohostText if cohostText else None,
+            placeholder="Example: '123456789012345678, 234567890123456789'" if not cohostText else None,
+        )
+        
+        self.add_item(self.cohostsInput)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.cohostsInput.value or "").strip()
+        userIdStrs = [part.strip() for part in raw.split(",") if part.strip()]
+        userIds = []
+        for userIdStr in userIdStrs:
+            try:
+                userId = int(userIdStr)
+                if userId >= 0:
+                    userIds.append(userId)
+            except ValueError:
+                await interaction.response.send_message(
+                    f"Invalid user ID: {userIdStr}",
+                    ephemeral=True,
+                )
+                return
+        await self.cog.handleEditCohosts(interaction, self.eventId, userIds, self.managementId)
+
+class HonorGuardEditSupervisorsModal(discord.ui.Modal, title="Edit Supervisors"):
+    def __init__(self, cog: "HonorGuardCog", eventId: int, supervisorText: str, managementId: int):
+        super().__init__()
+        self.cog = cog
+        self.eventId = int(eventId)
+        self.supervisorText = supervisorText
+        self.managementId = int(managementId)
+
+        self.supervisorsInput = discord.ui.TextInput(
+            label="Supervisor user IDs (comma-separated)",
+            style=discord.TextStyle.short,
+            required=False,
+            default=self.supervisorText if supervisorText else None,
+            placeholder="Example: '123456789012345678, 234567890123456789'" if not supervisorText else None,
+        )
+        
+        self.add_item(self.supervisorsInput)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.supervisorsInput.value or "").strip()
+        userIdStrs = [part.strip() for part in raw.split(",") if part.strip()]
+        userIds = []
+        for userIdStr in userIdStrs:
+            try:
+                userId = int(userIdStr)
+                if userId >= 0:
+                    userIds.append(userId)
+            except ValueError:
+                await interaction.response.send_message(
+                    f"Invalid user ID: {userIdStr}",
+                    ephemeral=True,
+                )
+                return
+        await self.cog.handleEditSupervisors(interaction, self.eventId, userIds, self.managementId)
+
+class HonorGuardRemoveAttendeesModal(discord.ui.Modal, title="Remove Attendees"):
+    def __init__(self, cog: "HonorGuardCog", eventId: int, managementId: int):
+        super().__init__()
+        self.cog = cog
+        self.eventId = int(eventId)
+        self.managementId = int(managementId)
+
+        self.attendeesInput = discord.ui.TextInput(
+            label="Attendee user IDs (comma-separated)",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            placeholder="Example: 123456789012345678, 234567890123456789" ,
+        )
+        
+        self.add_item(self.attendeesInput)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.attendeesInput.value or "").strip()
+        userIdStrs = [part.strip() for part in raw.split(",") if part.strip()]
+        userIds = []
+        for userIdStr in userIdStrs:
+            try:
+                userId = int(userIdStr)
+                if userId >= 0:
+                    userIds.append(userId)
+            except ValueError:
+                await interaction.response.send_message(
+                    f"Invalid user ID: {userIdStr}",
+                    ephemeral=True,
+                )
+                return
+        await self.cog.handleRemoveAttendees(interaction, self.eventId, userIds, self.managementId)
