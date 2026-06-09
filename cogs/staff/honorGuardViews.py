@@ -483,15 +483,6 @@ class HonorGuardEventSubmitView(discord.ui.View):
     )
     async def pointsBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.openEditPoints(interaction, self.eventId)
-
-    @discord.ui.button(
-        label="Submit",
-        style=discord.ButtonStyle.success,
-        row=0,
-        custom_id="honorguard_event_submit:submit",
-    )
-    async def submitBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self.cog.handleEventFinish(interaction, self.eventId)
     
     @discord.ui.button(
         label="Submit",
@@ -548,50 +539,50 @@ class HonorGuardEventManageView(discord.ui.View):
         self.eventId = int(eventId)
         self.managementId = int(managementId)
 
-        @discord.ui.button(
-            label="Edit Cohosts",
-            style=discord.ButtonStyle.secondary,
-            row=0,
-            custom_id="honorguard_event_manage:edit_cohosts",
-        )
-        async def editCohostsBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
-            await self.cog.openEditCohosts(interaction, self.eventId, self.managementId)
+    @discord.ui.button(
+        label="Edit Cohosts",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="honorguard_event_manage:edit_cohosts",
+    )
+    async def editCohostsBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog.openEditCohosts(interaction, self.eventId, self.managementId)
 
-        @discord.ui.button(
-            label="Edit Supervisors",
-            style=discord.ButtonStyle.secondary,
-            row=0,
-            custom_id="honorguard_event_manage:edit_supervisors",
-        )
-        async def editSupervisorsBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
-            await self.cog.openEditSupervisors(interaction, self.eventId, self.managementId)
+    @discord.ui.button(
+        label="Edit Supervisors",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="honorguard_event_manage:edit_supervisors",
+    )
+    async def editSupervisorsBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog.openEditSupervisors(interaction, self.eventId, self.managementId)
 
-        @discord.ui.button(
-            label="Remove Attendees",
-            style=discord.ButtonStyle.secondary,
-            row=0,
-            custom_id="honorguard_event_manage:remove_attendees",
-        )
-        async def removeAttendeesBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
-            await self.cog.openRemoveAttendees(interaction, self.eventId, self.managementId)
+    @discord.ui.button(
+        label="Remove Attendees",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="honorguard_event_manage:remove_attendees",
+    )
+    async def removeAttendeesBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog.openRemoveAttendees(interaction, self.eventId, self.managementId)
 
-        @discord.ui.button(
-            label="Done",
-            style=discord.ButtonStyle.primary,
-            row=1,
-            custom_id="honorguard_event_manage:done",
-        )
-        async def doneBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
-            await self.cog.closeEventManage(interaction, self.eventId, self.managementId)
+    @discord.ui.button(
+        label="Done",
+        style=discord.ButtonStyle.primary,
+        row=1,
+        custom_id="honorguard_event_manage:done",
+    )
+    async def doneBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog.closeEventManage(interaction, self.eventId, self.managementId)
         
-        @discord.ui.button(
-            label="Cancel",
-            style=discord.ButtonStyle.danger,
-            row=1,
-            custom_id="honorguard_event_manage:cancel_changes",
-        )
-        async def cancelChangesBtn(interaction: discord.Interaction, _: discord.ui.Button) -> None:
-            await self.cog.cancelEventManage(interaction, self.eventId, self.managementId)
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.danger,
+        row=1,
+        custom_id="honorguard_event_manage:cancel_changes",
+    )
+    async def cancelChangesBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.cancelEventManage(interaction, self.eventId, self.managementId)
 
 class HonorGuardEditCohostsModal(discord.ui.Modal, title="Edit Cohosts"):
     def __init__(self, cog: "HonorGuardCog", eventId: int, cohostText: str, managementId: int):

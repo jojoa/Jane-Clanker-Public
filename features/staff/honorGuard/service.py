@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import math
 from dataclasses import dataclass
@@ -637,7 +637,8 @@ async def ensurePointAwardRecordsForSubmission(
 
 async def createAttendanceRecord(
     *,
-    eventRecordId: int,
+    eventId: int,
+    guildId: int,
     targetUserId: int,
     memberGroup: str,
     participationRole: str = "ATTENDEE",
@@ -647,35 +648,36 @@ async def createAttendanceRecord(
         """
         INSERT INTO hg_attendance_records
             (
-                eventRecordId, targetUserId,
+                eventId, guildId, targetUserId,
                 participationRole, memberGroup,
                 createdBy
             )
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
-            int(eventRecordId),
+            int(eventId),
+            int(guildId),
             int(targetUserId),
-            _participationRole(participationRole.upper(),
+            participationRole.upper(),
             str(memberGroup or "").strip().upper(),
             int(createdBy or 0),
         ),
-    ))
+    )
     return recordId
 
 async def removeAttendanceRecord(
     *,
-    eventRecordId: int,
+    eventId: int,
     targetUserId: int,
 ) -> int:
     await execute(
         """
         DELETE FROM hg_attendance_records
-        WHERE eventRecordId = ?
+        WHERE eventId = ?
           AND targetUserId = ?
         """,
         (
-            int(eventRecordId),
+            int(eventId),
             int(targetUserId),
         ),
     )
@@ -854,7 +856,7 @@ async def updateSoloSentrySubmissionStatus(
 
 async def createEventSubmission(
     *,
-    eventRecordId: int,
+    eventId: int,
     event: dict[str, Any],
     submitterId: int,
     imageUrls: list[str] | None,
@@ -865,16 +867,16 @@ async def createEventSubmission(
         channelId=int(event["channelId"]),
         submitterId=int(submitterId),
         submissionType="EVENT_RECORD",
-        targetUserId=int(event.get("hostUserId") or 0),
+        targetUserId=int(event.get("hostId") or 0),
         eventDate=event.get("eventDate") or "",
         metadata={
-            "eventRecordId": int(eventRecordId),
+            "eventRecordId": int(eventId),
             "durationMinutes": int(event.get("durationMinutes") or 0),
             "imageUrls": list(imageUrls or []),
             "evidenceMessageUrl": str(evidenceMessageUrl or "").strip(),
         }
     )
-    await execute("""UPDATE hg_event_records SET submissionId = ? WHERE eventRecordId = ? """, (submissionId, int(eventRecordId)))
+    await execute("""UPDATE hg_event_records SET submissionId = ? WHERE eventId = ? """, (submissionId, int(eventId)))
 
 async def createEventRecord(
     *,
@@ -882,27 +884,27 @@ async def createEventRecord(
     eventType: str,
     eventTitle: str = "",
     eventDate: str = "",
-    hostUserId: int = 0,
+    hostId: int = 0,
     attendeeCount: int = 0,
     metadata: object = None,
     createdById: int = 0,
 ) -> int:
-    timestamp = datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return await executeReturnId(
         """
         INSERT INTO hg_event_records
             (
-                guildId, eventType, eventTitle, eventDate, hostUserId,
+                guildId, eventType, eventTitle, eventDate, hostId,
                 attendeeCount, metadataJson, createdBy, startedAt
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(guildId),
-            _eventType(eventType),
+            str(eventType),
             str(eventTitle or "").strip(),
             str(eventDate or "").strip(),
-            int(hostUserId or 0),
+            int(hostId or 0),
             int(attendeeCount or 0),
             _jsonText(metadata),
             int(createdById or 0),
@@ -911,27 +913,27 @@ async def createEventRecord(
     )
 
 
-async def setEventRecordMessageId(eventRecordId: int, messageId: int) -> None:
+async def setEventRecordMessageId(eventId: int, messageId: int) -> None:
     await execute(
         """
         UPDATE hg_event_records
         SET messageId = ?, updatedAt = datetime('now')
-        WHERE eventRecordId = ?
+        WHERE eventId = ?
         """,
-        (int(messageId or 0), int(eventRecordId)),
+        (int(messageId or 0), int(eventId)),
     )
 
 
-async def updateEventRecordStatus(eventRecordId: int, status: str) -> None:
-    if status in {"CANCELED", "SUBMITTING", "GRADING"}:
+async def updateEventRecordStatus(eventId: int, status: str) -> None:
+    if status in {"CANCELED", "FINISHED", "GRADING"}:
         await execute(
-            "UPDATE hg_event_records SET status = ?, finishedAt = datetime('now') WHERE eventRecordId = ?",
-            (status, eventRecordId),
+            "UPDATE hg_event_records SET status = ?, finishedAt = datetime('now') WHERE eventId = ?",
+            (status, eventId),
         )
     else:
         await execute(
-            "UPDATE hg_event_records SET status = ?, finishedAt = NULL WHERE eventRecordId = ?",
-            (status, eventRecordId),
+            "UPDATE hg_event_records SET status = ?, finishedAt = NULL WHERE eventId = ?",
+            (status, eventId),
         )
 
 async def listOpenEventSessions() -> List[Dict]:
@@ -940,20 +942,20 @@ async def listOpenEventSessions() -> List[Dict]:
         SELECT *
         FROM hg_event_records
         WHERE status = 'OPEN'
-        ORDER BY createdAt ASC, eventRecordId ASC
+        ORDER BY createdAt ASC, eventId ASC
         """,
     )
     return records
 
-async def listHonorGuardAttendees(eventRecordId: int) -> List[Dict]:
+async def listHonorGuardAttendees(eventId: int) -> List[Dict]:
     return await fetchAll(
         """
         SELECT *
         FROM hg_attendance_records
-        WHERE eventRecordId = ?
+        WHERE eventId = ?
         ORDER BY createdAt ASC, recordId ASC
         """,
-        (int(eventRecordId),),
+        (int(eventId),),
     )
 
 async def getEventSubmission(submissionId: int) -> Optional[dict[str, Any]]:
@@ -968,30 +970,30 @@ async def getEventSubmission(submissionId: int) -> Optional[dict[str, Any]]:
 
 
 
-async def getEventRecord(eventRecordId: int) -> Optional[dict[str, Any]]:
+async def getEventRecord(eventId: int) -> Optional[dict[str, Any]]:
     record = await fetchOne(
-        "SELECT * FROM hg_event_records WHERE eventRecordId = ?",
-        (int(eventRecordId),),
+        "SELECT * FROM hg_event_records WHERE eventId = ?",
+        (int(eventId),),
     )
     if record is None:
         return None
     enriched = dict(record)
-    enriched["startedAt"] = datetime.fromisoformat(str(record.get("createdAt") or "")).astimezone(datetime.timezone.utc)
+    enriched["startedAt"] = datetime.fromisoformat(str(record.get("createdAt") or "")).astimezone(timezone.utc)
 
     return enriched
 
 
-async def syncEventRecordToSheets(eventRecordId: int) -> dict[str, Any]:
+async def syncEventRecordToSheets(eventId: int) -> dict[str, Any]:
     ##NOT USED ATM
-    record = await getEventRecord(int(eventRecordId))
+    record = await getEventRecord(int(eventId))
     if record is None:
-        raise ValueError(f"Honor Guard event record not found: {eventRecordId}")
+        raise ValueError(f"Honor Guard event record not found: {eventId}")
 
     from features.staff.honorGuard import sheets as honorGuardSheets
 
     hostText = str(record.get("hostRobloxUsername") or "").strip()
-    if not hostText and int(record.get("hostUserId") or 0) > 0:
-        hostText = str(int(record.get("hostUserId") or 0))
+    if not hostText and int(record.get("hostId") or 0) > 0:
+        hostText = str(int(record.get("hostId") or 0))
     metadata = _jsonDict(record.get("metadataJson"))
     scheduleEventId = str(metadata.get("scheduleEventId") or metadata.get("eventId") or "").strip()
     eventType = str(record.get("eventType") or "").strip()
@@ -1016,7 +1018,7 @@ async def syncEventRecordToSheets(eventRecordId: int) -> dict[str, Any]:
     if hostText:
         eventHostUpdate = honorGuardSheets.incrementEventHostStats(host=hostText, eventType=eventType)
     return {
-        "eventRecordId": int(eventRecordId),
+        "eventId": int(eventId),
         "archiveSynced": True,
         "eventHostUpdate": eventHostUpdate,
     }
@@ -1062,7 +1064,7 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
         )
     else:
         ## Maybe in the future also use a batch writer
-        for attendanceRecord in await listHonorGuardAttendees(int(submission.get("metadataJson", {}) or {}).get("eventRecordId", 0)):
+        for attendanceRecord in await listHonorGuardAttendees(int(submission.get("metadataJson", {}) or {}).get("eventId", 0)):
             lookup = await robloxUsers.fetchRobloxUser(
                 int(attendanceRecord.get("targetUserId") or 0),
                 int(submission.get("guildId") or 0)

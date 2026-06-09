@@ -19,7 +19,7 @@ class HonorGuardAdapter:
             eventType=kwargs.get("eventType", "drill"),
             eventTitle=kwargs.get("eventTitle", "Honor Guard Event"),
             eventDate=kwargs.get("eventDate", ""),
-            hostUserId=hostId,
+            hostId=hostId,
             createdById=kwargs.get("createdBy", 0),
         )
 
@@ -36,7 +36,7 @@ class HonorGuardAdapter:
         return await honorGuardService.listHonorGuardAttendees(int(sessionId))
 
     async def addAttendee(self, sessionId: int, userId: int, **kwargs) -> None:
-        await honorGuardService.createAttendanceRecord(int(sessionId), int(userId), kwargs.get("memberGroup", "ENLISTED"), kwargs.get("participantRole", "ATTENDEE"), kwargs.get("createdBy", userId))
+        await honorGuardService.createAttendanceRecord(eventId = int(sessionId), guildId = int(kwargs.get("guildId")), targetUserId = int(userId), memberGroup = kwargs.get("memberGroup", "ENLISTED"), participationRole = kwargs.get("participationRole", "ATTENDEE"), createdBy = kwargs.get("createdBy", userId))
 
     async def removeAttendee(self, sessionId: int, userId: int) -> None:
         await honorGuardService.removeAttendanceRecord(int(sessionId), int(userId))
@@ -46,11 +46,11 @@ class HonorGuardAdapter:
 
     def normalizeSession(self, session: dict) -> dict:
         return {
-            "sessionId": int(session.get("eventRecordId") or 0),
+            "sessionId": int(session.get("eventId") or 0),
             "guildId": int(session.get("guildId") or 0),
             "channelId": int(session.get("channelId") or 0),
             "messageId": int(session.get("messageId") or 0),
-            "hostId": int(session.get("hostUserId") or 0),
+            "hostId": int(session.get("hostId") or 0),
             "status": str(session.get("status") or "OPEN").upper(),
         }
 

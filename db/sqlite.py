@@ -1191,7 +1191,7 @@ async def initDb():
             recordId INTEGER PRIMARY KEY AUTOINCREMENT,
             submissionId INTEGER NOT NULL DEFAULT 0,
             guildId INTEGER NOT NULL,
-            eventRecordId INTEGER NOT NULL,
+            eventId INTEGER NOT NULL,
             targetUserId INTEGER NOT NULL DEFAULT 0,
             participationRole TEXT NOT NULL DEFAULT 'ATTENDEE',
             memberGroup TEXT NOT NULL DEFAULT '',
@@ -1204,6 +1204,8 @@ async def initDb():
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
+        await _executeOptional("ALTER TABLE hg_attendance_records ADD COLUMN targetRobloxUsername TEXT NOT NULL DEFAULT ''")
+        await _executeOptional("ALTER TABLE hg_attendance_records ADD COLUMN eventDate TEXT NOT NULL DEFAULT ''")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS hg_sentry_logs (
             sentryLogId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1239,14 +1241,14 @@ async def initDb():
         """)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS hg_event_records (
-            eventRecordId INTEGER PRIMARY KEY AUTOINCREMENT,
+            eventId INTEGER PRIMARY KEY AUTOINCREMENT,
             submissionId INTEGER NOT NULL DEFAULT 0,
             messageId INTEGER NOT NULL DEFAULT 0,
             guildId INTEGER NOT NULL,
             eventType TEXT NOT NULL,
             eventTitle TEXT NOT NULL DEFAULT '',
             eventDate TEXT NOT NULL DEFAULT '',
-            hostUserId INTEGER NOT NULL DEFAULT 0,
+            hostId INTEGER NOT NULL DEFAULT 0,
             attendeeCount INTEGER NOT NULL DEFAULT 0,
             archiveSynced INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'OPEN', -- OPEN/FINISHED/SUBMITTED/CANCELED
@@ -1256,6 +1258,8 @@ async def initDb():
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
+        await _executeOptional("ALTER TABLE hg_event_records ADD COLUMN metadataJson TEXT NOT NULL DEFAULT '{}'")
+        await _executeOptional("ALTER TABLE hg_event_records ADD COLUMN updatedAt TEXT NOT NULL DEFAULT (datetime('now'))")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS reaction_role_entries (
             entryId INTEGER PRIMARY KEY AUTOINCREMENT,
