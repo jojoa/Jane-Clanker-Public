@@ -138,15 +138,15 @@ def _attendanceQuotaPoints(configModule: Any, eventType: str) -> float:
 def _attendancePromotionPoints(configModule: Any, eventType: str, durationMinutes: int) -> float:
     byType = _configuredComplexPointMap(configModule, "honorGuardAttendancePromotionPointsByEventType")
     intervall = max(1, int(getattr(configModule, "honorGuardAttendancePromotionPointsIntervallMinutes", 30) or 30))
-    points = byType.get(eventType, 0).get("base", 0) + byType.get(eventType, 0).get("per_intervall", 0) * durationMinutes // intervall
-    points = max(points, byType.get(eventType, 0).get("minimum", 0))
+    points = byType.get(eventType, {}).get("base", 0) + byType.get(eventType, {}).get("per_intervall", 0) * durationMinutes // intervall
+    points = max(points, byType.get(eventType, {}).get("minimum", 0))
     return float(points)
 
 def _supervisorPromotionPoints(configModule: Any, eventType: str, durationMinutes: int) -> float:
     byType = _configuredComplexPointMap(configModule, "honorGuardSupervisorPromotionPointsByEventType")
     intervall = max(1, int(getattr(configModule, "honorGuardAttendancePromotionPointsIntervallMinutes", 30) or 30))
-    points = byType.get(eventType, 0).get("base", 0) + byType.get(eventType, 0).get("per_intervall", 0) * durationMinutes // intervall
-    points = max(points, byType.get(eventType, 0).get("minimum", 0))
+    points = byType.get(eventType, {}).get("base", 0) + byType.get(eventType, {}).get("per_intervall", 0) * durationMinutes // intervall
+    points = max(points, byType.get(eventType, {}).get("minimum", 0))
     return float(points)
 
 
@@ -160,7 +160,7 @@ def calculatePointDeltas(
     configModule: Any,
     memberGroup: str = "",
     eventType: str = "",
-    participationRole: str = "attendee",
+    participantRole: str = "ATTENDEE",
     durationMinutes: int = 0,
     attendeeCount: int = 0,
     gradedAttendeeCount: int = 0,
@@ -168,7 +168,7 @@ def calculatePointDeltas(
     screenAssist: bool = False,
 ) -> HonorGuardPointDeltas:
     normalizedEvent = _normalizeKey(eventType).lower()
-    normalizedRole = _normalizeKey(participationRole).lower()
+    normalizedRole = _normalizeKey(participantRole).upper()
     group = str(memberGroup or "").strip().lower()
     attendeeTotal = max(0, int(attendeeCount or 0))
     gradedTotal = max(0, int(gradedAttendeeCount or 0))
@@ -179,61 +179,61 @@ def calculatePointDeltas(
     attendanceEligible = group in {"enlisted", "nco"}
     officerLike = group in {"officer", "nco", ""}
 
-    if normalizedEvent not in {"jge", "nco_exam"}:
-        if normalizedRole == "attendee":
+    if normalizedEvent not in {"jge", "ncoe"}:
+        if normalizedRole == "ATTENDEE":
             if attendanceEligible:
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
                 promotionEventPoints = _attendancePromotionPoints(configModule, normalizedEvent, durationMinutes)
             elif normalizedEvent == "inspection":
                 promotionEventPoints = _attendancePromotionPoints(configModule, normalizedEvent, durationMinutes) or 8
 
-        elif normalizedRole == "host":
+        elif normalizedRole == "HOST":
             if officerLike:
                 hostMap = _configuredPointMap(configModule, "honorGuardHostPromotionPointsByEventType")
                 promotionEventPoints = float(hostMap.get(normalizedEvent, 0))
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
 
-        elif normalizedRole == "supervisor":
+        elif normalizedRole == "SUPERVISOR":
             if officerLike:
                 promotionEventPoints = _supervisorPromotionPoints(configModule, normalizedEvent, durationMinutes)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
 
-        elif normalizedRole == "cohost":
+        elif normalizedRole == "COHOST":
             if officerLike:
                 promotionEventPoints = _attendancePromotionPoints(configModule, normalizedEvent, durationMinutes)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
 
     if normalizedEvent == "jge":
-        if normalizedRole == "host":
+        if normalizedRole == "HOST":
             rate = float(getattr(configModule, "honorGuardJgePointsPerGradedAttendee", 0.75) or 0.75)
             promotionEventPoints = _ceilPoints(rate * attendeeTotal)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
-        elif normalizedRole in {"cohost", "supervisor"}:
+        elif normalizedRole in {"COHOST", "SUPERVISOR"}:
             rate = float(getattr(configModule, "honorGuardJgePointsPerGradedAttendee", 0.75) or 0.75)
             promotionEventPoints = _ceilPoints(rate * gradedTotal)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
-        elif normalizedRole == "attendee" and passed:
+        elif normalizedRole == "ATTENDEE" and passed:
             quotaPoints = _attendanceQuotaPoints(configModule, "jge")
             promotionEventPoints = _attendancePromotionPoints(configModule, "jge", durationMinutes)
 
-    if normalizedEvent == "nco_exam":
+    if normalizedEvent == "ncoe":
         rate = float(getattr(configModule, "honorGuardNcoExamPointsPerGradedAttendee", 1.5) or 1.5)
         screenAssistPoints = float(getattr(configModule, "honorGuardNcoExamScreenAssistPoints", 2) or 2)
-        if normalizedRole == "host":
+        if normalizedRole == "HOST":
             promotionEventPoints = _ceilPoints(rate * attendeeTotal)
-        elif normalizedRole in {"cohost", "supervisor"}:
+        elif normalizedRole in {"COHOST", "SUPERVISOR"}:
             if screenAssist:
                 promotionEventPoints = screenAssistPoints
             if gradedTotal > 0:
                 promotionEventPoints += _ceilPoints(rate * gradedTotal)
-        elif normalizedRole == "attendee" and passed:
-            quotaPoints = _attendanceQuotaPoints(configModule, "nco_exam")
-            promotionEventPoints = _attendancePromotionPoints(configModule, "nco_exam", durationMinutes)
+        elif normalizedRole == "ATTENDEE" and passed:
+            quotaPoints = _attendanceQuotaPoints(configModule, "ncoe")
+            promotionEventPoints = _attendancePromotionPoints(configModule, "ncoe", durationMinutes)
 
     return HonorGuardPointDeltas(
         quotaPoints=float(quotaPoints),
@@ -639,17 +639,17 @@ async def createAttendanceRecord(
     *,
     eventId: int,
     guildId: int,
-    targetUserId: int,
+    userId: int,
     memberGroup: str,
-    participationRole: str = "ATTENDEE",
+    participantRole: str = "ATTENDEE",
     createdBy: int = 0,
 ) -> int:
     recordId = await executeReturnId(
         """
         INSERT INTO hg_attendance_records
             (
-                eventId, guildId, targetUserId,
-                participationRole, memberGroup,
+                eventId, guildId, userId,
+                participantRole, memberGroup,
                 createdBy
             )
         VALUES (?, ?, ?, ?, ?, ?)
@@ -657,8 +657,8 @@ async def createAttendanceRecord(
         (
             int(eventId),
             int(guildId),
-            int(targetUserId),
-            participationRole.upper(),
+            int(userId),
+            participantRole.upper(),
             str(memberGroup or "").strip().upper(),
             int(createdBy or 0),
         ),
@@ -668,22 +668,38 @@ async def createAttendanceRecord(
 async def removeAttendanceRecord(
     *,
     eventId: int,
-    targetUserId: int,
+    userId: int,
 ) -> int:
     await execute(
         """
         DELETE FROM hg_attendance_records
         WHERE eventId = ?
-          AND targetUserId = ?
+          AND userId = ?
         """,
         (
             int(eventId),
-            int(targetUserId),
+            int(userId),
         ),
     )
     return 1
 
-
+async def updateAttendeePoints(
+    *,
+    recordId: int,
+    points: HonorGuardPointDeltas,
+) -> None:
+    await execute(
+        """
+        UPDATE hg_attendance_records
+        SET quotaPoints = ?, promotionEventPoints = ?
+        WHERE recordId = ?
+        """,
+        (
+            float(points.quotaPoints),
+            float(points.promotionEventPoints),
+            int(recordId),
+        ),
+    )
 
 async def createSoloSentryLog(
     *,
@@ -887,6 +903,7 @@ async def createEventRecord(
     hostId: int = 0,
     attendeeCount: int = 0,
     metadata: object = None,
+    channelId: int = 0,
     createdById: int = 0,
 ) -> int:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -894,10 +911,10 @@ async def createEventRecord(
         """
         INSERT INTO hg_event_records
             (
-                guildId, eventType, eventTitle, eventDate, hostId,
+                guildId, eventType, eventTitle, eventDate, hostId, channelId,
                 attendeeCount, metadataJson, createdBy, startedAt
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(guildId),
@@ -905,6 +922,7 @@ async def createEventRecord(
             str(eventTitle or "").strip(),
             str(eventDate or "").strip(),
             int(hostId or 0),
+            int(channelId or 0),
             int(attendeeCount or 0),
             _jsonText(metadata),
             int(createdById or 0),
@@ -1066,12 +1084,12 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
         ## Maybe in the future also use a batch writer
         for attendanceRecord in await listHonorGuardAttendees(int(submission.get("metadataJson", {}) or {}).get("eventId", 0)):
             lookup = await robloxUsers.fetchRobloxUser(
-                int(attendanceRecord.get("targetUserId") or 0),
+                int(attendanceRecord.get("userId") or 0),
                 int(submission.get("guildId") or 0)
             )
             targetRobloxUsername = str(lookup.robloxUsername or "").strip()
             honorGuardSheets.applyMemberPointDeltas(
-                discordId=int(attendanceRecord.get("targetUserId") or 0),
+                discordId=int(attendanceRecord.get("userId") or 0),
                 robloxUsername=targetRobloxUsername,
                 quotaDelta=attendanceRecord.get("quotaPoints") or 0,
                 promotionEventDelta=attendanceRecord.get("promotionEventPoints") or 0,

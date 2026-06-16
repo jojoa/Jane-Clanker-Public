@@ -20,6 +20,7 @@ class HonorGuardAdapter:
             eventTitle=kwargs.get("eventTitle", "Honor Guard Event"),
             eventDate=kwargs.get("eventDate", ""),
             hostId=hostId,
+            channelId=channelId,
             createdById=kwargs.get("createdBy", 0),
         )
 
@@ -36,10 +37,10 @@ class HonorGuardAdapter:
         return await honorGuardService.listHonorGuardAttendees(int(sessionId))
 
     async def addAttendee(self, sessionId: int, userId: int, **kwargs) -> None:
-        await honorGuardService.createAttendanceRecord(eventId = int(sessionId), guildId = int(kwargs.get("guildId")), targetUserId = int(userId), memberGroup = kwargs.get("memberGroup", "ENLISTED"), participationRole = kwargs.get("participationRole", "ATTENDEE"), createdBy = kwargs.get("createdBy", userId))
+        await honorGuardService.createAttendanceRecord(eventId = int(sessionId), guildId = int(kwargs.get("guildId")), userId = int(userId), memberGroup = kwargs.get("memberGroup", "ENLISTED"), participantRole = kwargs.get("participantRole", "ATTENDEE"), createdBy = kwargs.get("createdBy", userId))
 
     async def removeAttendee(self, sessionId: int, userId: int) -> None:
-        await honorGuardService.removeAttendanceRecord(int(sessionId), int(userId))
+        await honorGuardService.removeAttendanceRecord(eventId=int(sessionId), userId=int(userId))
 
     async def updateSessionStatus(self, sessionId: int, status: str) -> None:
         await honorGuardService.updateEventRecordStatus(int(sessionId), str(status))
@@ -54,23 +55,27 @@ class HonorGuardAdapter:
             "status": str(session.get("status") or "OPEN").upper(),
         }
 
-    def buildEmbed(self, session: dict, attendees: Sequence[dict]) -> discord.Embed:
+    def buildEmbed(self, session: dict, allAttendees: Sequence[dict]) -> discord.Embed:
         normalized = self.normalizeSession(session)
+
+        attendees = filter(lambda x: str(x.get("participantRole")).upper() == "ATTENDEE", allAttendees)
+        supervisors = filter(lambda x: str(x.get("participantRole")).upper() == "SUPERVISOR", allAttendees)
+        cohosts = filter(lambda x: str(x.get("participantRole")).upper() == "COHOST", allAttendees)
+
         attendeeMentions = [
             f"{index + 1}. <@{int(row.get('userId') or 0)}>"
             for index, row in enumerate(attendees)
-            if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "ATTENDEE").upper() == "ATTENDEE"
+            if int(row.get("userId") or 0) > 0
         ]
         supervisorMentions = [
             f"{index + 1}. <@{int(row.get('userId') or 0)}>"
-            for index, row in enumerate(attendees)
-            if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "SUPERVISOR").upper() == "SUPERVISOR"
+            for index, row in enumerate(supervisors)
+            if int(row.get("userId") or 0) > 0
         ]
-
         cohostMentions = [
             f"{index + 1}. <@{int(row.get('userId') or 0)}>"
-            for index, row in enumerate(attendees)
-            if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "COHOST").upper() == "COHOST"
+            for index, row in enumerate(cohosts)
+            if int(row.get("userId") or 0) > 0
         ]
 
         embed = discord.Embed(
@@ -94,23 +99,27 @@ class HonorGuardAdapter:
         embed.add_field(name="Status", value=normalized["status"], inline=False)
         return embed
 
-    def buildEventManageEmbed(self, session: dict, attendees: Sequence[dict]) -> discord.Embed:
+    def buildEventManageEmbed(self, session: dict, allAttendees: Sequence[dict]) -> discord.Embed:
         normalized = self.normalizeSession(session)
+
+        attendees = filter(lambda x: str(x.get("participantRole")).upper() == "ATTENDEE", allAttendees)
+        supervisors = filter(lambda x: str(x.get("participantRole")).upper() == "SUPERVISOR", allAttendees)
+        cohosts = filter(lambda x: str(x.get("participantRole")).upper() == "COHOST", allAttendees)
+
         attendeeMentions = [
             f"{index + 1}. <@{int(row.get('userId') or 0)}>"
             for index, row in enumerate(attendees)
-            if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "ATTENDEE").upper() == "ATTENDEE"
+            if int(row.get("userId") or 0) > 0
         ]
         supervisorMentions = [
             f"{index + 1}. <@{int(row.get('userId') or 0)}>"
-            for index, row in enumerate(attendees)
-            if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "SUPERVISOR").upper() == "SUPERVISOR"
+            for index, row in enumerate(supervisors)
+            if int(row.get("userId") or 0) > 0
         ]
-
         cohostMentions = [
             f"{index + 1}. <@{int(row.get('userId') or 0)}>"
-            for index, row in enumerate(attendees)
-            if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "COHOST").upper() == "COHOST"
+            for index, row in enumerate(cohosts)
+            if int(row.get("userId") or 0) > 0
         ]
 
         embed = discord.Embed(
@@ -134,45 +143,48 @@ class HonorGuardAdapter:
         embed.add_field(name="Status", value=normalized["status"], inline=False)
         return embed
     
-    def buildSubmitEmbed(self, session: dict, attendees: Sequence[dict]) -> discord.Embed:
+    def buildSubmitEmbed(self, session: dict, allAttendees: Sequence[dict]) -> discord.Embed:
         normalized = self.normalizeSession(session)
         embed = discord.Embed(
             title="Submit Honor Guard Event",
             description="Review the event details and submit.",
         )
-        attendeeText = "\n".join(
-            [
-                f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.honorGuardService.calculatePointDeltas()} points"
-                for index, row in enumerate(attendees)
-                if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "ATTENDEE").upper() == "ATTENDEE"
-            ]
-        ) or "No attendees yet."
-        supervisorText = "\n".join(
-            [
-                f"{index + 1}. <@{int(row.get('userId') or 0)}>"
-                for index, row in enumerate(attendees)
-                if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "SUPERVISOR").upper() == "SUPERVISOR"
-            ]
-        ) or "No supervisors assigned."
-        cohostText = "\n".join(
-            [
-                f"{index + 1}. <@{int(row.get('userId') or 0)}>"
-                for index, row in enumerate(attendees)
-                if int(row.get("userId") or 0) > 0 and str(row.get("participantRole") or "COHOST").upper() == "COHOST"
-            ]
-        ) or "No cohosts assigned."
-        embed.add_field(name="Host", value=f"<@{normalized['hostId']}>", inline=False)
+
+        attendees = filter(lambda x: str(x.get("participantRole")).upper() == "ATTENDEE", allAttendees)
+        supervisors = filter(lambda x: str(x.get("participantRole")).upper() == "SUPERVISOR", allAttendees)
+        cohosts = filter(lambda x: str(x.get("participantRole")).upper() == "COHOST", allAttendees)
+
+        attendeeMentions = [
+            f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+            for index, row in enumerate(attendees)
+            if int(row.get("userId") or 0) > 0
+        ]
+        supervisorMentions = [
+            f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+            for index, row in enumerate(supervisors)
+            if int(row.get("userId") or 0) > 0
+        ]
+        cohostMentions = [
+            f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+            for index, row in enumerate(cohosts)
+            if int(row.get("userId") or 0) > 0
+        ]
+
+        host = next((row for row in allAttendees if int(row.get("userId") or 0) == normalized["hostId"]), None)
+        hostMention = f"<@{int(host.get('userId') or 0)}> - {host.get("quotaPoints")}E{host.get("promotionEventPoints")} points"
+
+        embed.add_field(name="Host", value=hostMention, inline=False)
         embed.add_field(
-            name=f"Supervisors ({len(supervisorText)}):\n",
-            value=", ".join(supervisorText) if supervisorText else "No supervisors assigned.",
+            name=f"Supervisors ({len(supervisorMentions)}):\n",
+            value="\n".join(supervisorMentions) if supervisorMentions else "No supervisors assigned.",
             inline=False)
         embed.add_field(
-            name=f"Cohosts ({len(cohostText)}):\n",
-            value=", ".join(cohostText) if cohostText else "No cohosts assigned.",
+            name=f"Cohosts ({len(cohostMentions)}):\n",
+            value="\n".join(cohostMentions) if cohostMentions else "No cohosts assigned.",
             inline=False)
         embed.add_field(
-            name=f"Attendees ({len(attendeeText)}):\n",
-            value="\n".join(attendeeText) if attendeeText else "No attendees yet.",
+            name=f"Attendees ({len(attendeeMentions)}):\n",
+            value="\n".join(attendeeMentions) if attendeeMentions else "No attendees yet.",
             inline=False,
         )
         return embed

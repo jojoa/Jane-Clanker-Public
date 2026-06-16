@@ -146,6 +146,9 @@ class ClockinEngine:
 
         targetMessage = await self._resolveMessageFromSession(session, message=message)
         if targetMessage is None:
+            print(normalized.get("channelId"))
+            print(normalized.get("messageId"))
+            raise Exception("Unable to resolve message for this event session.")
             return
         await interactionRuntime.safeMessageEdit(targetMessage, embed=embed, view=view)
 
@@ -157,5 +160,6 @@ class ClockinEngine:
     ) -> None:
         targetMessage = await self._resolveMessageFromSession(session, message=message)
         if targetMessage is None:
+            raise Exception("Unable to resolve message for this event session.")
             return
         await interactionRuntime.safeMessageDelete(targetMessage)

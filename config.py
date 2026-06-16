@@ -163,7 +163,10 @@ anrorsRmPlusRoleId = 0  # ANRORS RM+
 # Honor Guard roles.
 honorGuardReviewerRoleId = 0
 honorGuardReviewerPingRoleId = 0
+honorGuardSeniorGuardsmanRoleId = 0
+honorGuardPlatoonSergeantRoleId = 0
 honorGuardParadeOfficerPlusRoleIds = []  # Parade Officer+ roles for promotion eligibility and point awards
+honorGuardRoleId = 0
 
 # ANRD role placeholders (for future role -> ORBAT rank sync).
 anrdRoleProbationaryId = 0
@@ -321,7 +324,7 @@ trainingMirrorWebhookName = "Jane Training Log"
 johnEventLogChannelId = 0
 johnClankerBotId = 0
 
-honorGuardEnabled = False
+honorGuardEnabled = True
 honorGuardCommandGuildIds = []
 honorGuardReviewChannelId = 0
 honorGuardLogChannelId = 0
@@ -371,7 +374,7 @@ honorGuardEventHostInspectionsColumn = "J"
 honorGuardEventHostEventTypeColumns = {
     "jge": honorGuardEventHostExamsColumn,
     "junior guardsman exam": honorGuardEventHostExamsColumn,
-    "nco_exam": honorGuardEventHostExamsColumn,
+    "ncoe": honorGuardEventHostExamsColumn,
     "nco exam": honorGuardEventHostExamsColumn,
     "orientation": honorGuardEventHostTrainingsColumn,
     "training": honorGuardEventHostTrainingsColumn,
@@ -404,19 +407,46 @@ honorGuardAttendanceQuotaPointsByEventType = {
     "gamenight": 0.5,
 }
 honorGuardAttendancePromotionPointsByEventType = {
-    "inspection": 8,
-    "sentry": 1,
+    "drill" : {
+        "base": 2,
+        "per_intervall": 0,
+        "minimum": 0
+    },
+    "inspection": {
+        "base": 8,
+        "per_intervall": 0,
+        "minimum": 0
+    },
+    "sentry": {
+        "base": 0,
+        "per_intervall": 1,
+        "minimum": 0
+    },
+    "orientation": {
+        "base": 0,
+        "per_intervall": 1,
+        "minimum": 2
+    },
 }
 honorGuardHostPromotionPointsByEventType = {
     "gamenight": 1,
     "orientation": 2,
-    "training": 3,
+    "drill": 3,
     "lecture": 3,
     "tryout": 6,
     "inspection": 8,
 }
 honorGuardSupervisorPromotionPointsByEventType = {
-    "orientation": 2,
+    "orientation": {
+        "base": 0,
+        "per_intervall": 1,
+        "minimum": 2
+    },
+    "drill" : {
+        "base": 2,
+        "per_intervall": 0,
+        "minimum": 0
+    },
 }
 honorGuardJgePointsPerGradedAttendee = 0.75
 honorGuardNcoExamPointsPerGradedAttendee = 1.5
