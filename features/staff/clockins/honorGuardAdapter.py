@@ -80,7 +80,7 @@ class HonorGuardAdapter:
 
         embed = discord.Embed(
             title="Honor Guard Clock-in",
-            description="Event attendance list",
+            description=session.get("eventTitle") or "Honor Guard Event",
         )
         embed.add_field(name="Host", value=f"<@{normalized['hostId']}>", inline=False)
         embed.add_field(
@@ -124,7 +124,7 @@ class HonorGuardAdapter:
 
         embed = discord.Embed(
             title="Honor Guard Clock-in Management",
-            description="Manage event attendance",
+            description=session.get("eventTitle") or "Honor Guard Event",
         )
         embed.add_field(name="Host", value=f"<@{normalized['hostId']}>", inline=False)
         embed.add_field(
@@ -147,7 +147,7 @@ class HonorGuardAdapter:
         normalized = self.normalizeSession(session)
         embed = discord.Embed(
             title="Submit Honor Guard Event",
-            description="Review the event details and submit.",
+            description=session.get("eventTitle") or "Honor Guard Event",
         )
 
         attendees = filter(lambda x: str(x.get("participantRole")).upper() == "ATTENDEE", allAttendees)

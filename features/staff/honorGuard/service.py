@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import math
 from dataclasses import dataclass
@@ -67,6 +67,33 @@ def _jsonDict(value: object) -> dict[str, Any]:
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
+def format_duration(minutes):
+    hours, mins = divmod(minutes, 60)
+
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if mins:
+        parts.append(f"{mins} minute" + ("s" if mins != 1 else ""))
+
+    return " ".join(parts) if parts else "0 minutes"
+
+async def _buildUserText(users: list[dict], guildId: int) -> str:
+    if not users:
+        return ""
+    usernames = []
+    for user in users:
+        try:
+            userId = int(user.get("userId") or 0)
+            lookup = await robloxUsers.fetchRobloxUser(
+                userId,
+                guildId
+            )
+            username = str(lookup.robloxUsername or "").strip()
+        except Exception:
+            username = ""
+        usernames.append(username)
+    return ", ".join(usernames)
 
 async def _rememberHonorGuardIdentity(
     *,
@@ -326,7 +353,14 @@ async def listEventPendingStatuses() -> List[Dict]:
     )
     enrichedSubmissions = []
     for submission in submissions:
+        metadata = _jsonDict(submission.get("metadataJson"))
         enriched = dict(submission)
+        enriched["eventId"] = int(metadata.get("eventRecordId") or 0)
+        enriched["imageUrls"] = [
+            str(value).strip()
+            for value in metadata.get("imageUrls", [])
+            if str(value).strip()
+        ] if isinstance(metadata.get("imageUrls"), list) else []
         enrichedSubmissions.append(enriched)
 
     return enrichedSubmissions
@@ -893,6 +927,7 @@ async def createEventSubmission(
         }
     )
     await execute("""UPDATE hg_event_records SET submissionId = ? WHERE eventId = ? """, (submissionId, int(eventId)))
+    return submissionId
 
 async def createEventRecord(
     *,
@@ -906,7 +941,7 @@ async def createEventRecord(
     channelId: int = 0,
     createdById: int = 0,
 ) -> int:
-    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    timestamp = datetime.now().isoformat(timespec="minutes")
     return await executeReturnId(
         """
         INSERT INTO hg_event_records
@@ -939,6 +974,16 @@ async def setEventRecordMessageId(eventId: int, messageId: int) -> None:
         WHERE eventId = ?
         """,
         (int(messageId or 0), int(eventId)),
+    )
+
+async def setEventRecordDuration(eventId: int, duration: int) -> None:
+    await execute(
+        """
+        UPDATE hg_event_records
+        SET durationMinutes = ?, updatedAt = datetime('now')
+        WHERE eventId = ?
+        """,
+        (int(duration or 0), int(eventId)),
     )
 
 
@@ -983,10 +1028,15 @@ async def getEventSubmission(submissionId: int) -> Optional[dict[str, Any]]:
     if str(submission.get("submissionType") or "").strip().upper() != "EVENT_RECORD":
         return None
 
+    metadata = _jsonDict(submission.get("metadataJson"))
     enriched = dict(submission)
+    enriched["eventId"] = int(metadata.get("eventRecordId") or 0)
+    enriched["imageUrls"] = [
+        str(value).strip()
+        for value in metadata.get("imageUrls", [])
+        if str(value).strip()
+    ] if isinstance(metadata.get("imageUrls"), list) else []
     return enriched
-
-
 
 async def getEventRecord(eventId: int) -> Optional[dict[str, Any]]:
     record = await fetchOne(
@@ -996,36 +1046,69 @@ async def getEventRecord(eventId: int) -> Optional[dict[str, Any]]:
     if record is None:
         return None
     enriched = dict(record)
-    enriched["startedAt"] = datetime.fromisoformat(str(record.get("createdAt") or "")).astimezone(timezone.utc)
-
+    enriched["startedAt"] = datetime.fromisoformat(str(record.get("startedAt")))
+    enriched["eventDate"] = datetime.fromisoformat(str(record.get("eventDate")))
     return enriched
+
+async def updateEventSubmissionStatus(
+    submissionId: int,
+    eventId: int,
+    status: str,
+    *,
+    reviewerId: int,
+    note: str | None = None,
+    threadId: int | None = None,
+) -> None:
+    details = {"threadId": int(threadId)} if int(threadId or 0) > 0 else None
+    await setSubmissionStatus(
+        submissionId=int(submissionId),
+        status=str(status or "").strip().upper(),
+        reviewerId=int(reviewerId or 0),
+        note=str(note or "").strip(),
+        details=details,
+    )
+    await updateEventRecordStatus(
+        eventId=int(eventId),
+        status=str(status or "").strip().upper(),
+    )
 
 
 async def syncEventRecordToSheets(eventId: int) -> dict[str, Any]:
-    ##NOT USED ATM
     record = await getEventRecord(int(eventId))
     if record is None:
         raise ValueError(f"Honor Guard event record not found: {eventId}")
 
+    if str(record.get("eventType") or "").strip() == "orientation":
+        return {"eventId": int(eventId), "archiveSynced": False, "eventHostUpdate": None}
+
     from features.staff.honorGuard import sheets as honorGuardSheets
 
-    hostText = str(record.get("hostRobloxUsername") or "").strip()
-    if not hostText and int(record.get("hostId") or 0) > 0:
-        hostText = str(int(record.get("hostId") or 0))
+    attendees = await listHonorGuardAttendees(int(record.get("eventId") or 0))
+    supervisors = [attendee for attendee in attendees if str(attendee.get("participantRole") or "").strip().upper() == "SUPERVISOR"]
+    cohosts = [attendee for attendee in attendees if str(attendee.get("participantRole") or "").strip().upper() == "COHOST"]
+
+    hostLookup = await robloxUsers.fetchRobloxUser(
+        int(record.get("hostId") or 0),
+        int(record.get("guildId") or 0)
+    )
+    hostText = str(hostLookup.robloxUsername or "").strip()
+    supervisorText = await _buildUserText(supervisors, int(record.get("guildId") or 0))
+    coHostText = await _buildUserText(cohosts, int(record.get("guildId") or 0))
     metadata = _jsonDict(record.get("metadataJson"))
     scheduleEventId = str(metadata.get("scheduleEventId") or metadata.get("eventId") or "").strip()
     eventType = str(record.get("eventType") or "").strip()
     eventTitle = str(record.get("eventTitle") or "").strip()
     eventDetail = str(metadata.get("eventDetail") or eventTitle).strip()
+    eventDate: datetime = record.get("eventDate", datetime.now())
     honorGuardSheets.archiveEvent(
         honorGuardSheets.HonorGuardArchiveRecord(
-            eventType=eventType,
-            eventTimeUtc=str(record.get("eventDate") or "").strip(),
+            eventType=eventType.title(),
+            eventTimeUtc=str(eventDate.strftime("%Y/%m/%d %I:%M %p")),
             eventTitle=eventTitle,
             host=hostText,
-            coHosts=str(metadata.get("coHosts") or "").strip(),
-            supervisors=str(metadata.get("supervisors") or "").strip(),
-            eventDuration=str(metadata.get("eventDuration") or "").strip(),
+            coHosts=coHostText,
+            supervisors=supervisorText,
+            eventDuration=format_duration(record.get("durationMinutes") or "").strip(),
             eventDetail=eventDetail,
             attendeeCount=int(record.get("attendeeCount") or 0),
             notes=str(metadata.get("notes") or "").strip(),
@@ -1043,6 +1126,7 @@ async def syncEventRecordToSheets(eventId: int) -> dict[str, Any]:
 
 
 async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
+    count = 0
     submission = await getSubmission(int(submissionId))
     if submission is None:
         raise ValueError(f"Honor Guard submission not found: {submissionId}")
@@ -1081,19 +1165,21 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
             promotionAwardedDelta=float(submission.get("promotionAwardedPoints") or 0),
         )
     else:
+        eventId = int(_jsonDict(submission.get("metadataJson")).get("eventRecordId"))
         ## Maybe in the future also use a batch writer
-        for attendanceRecord in await listHonorGuardAttendees(int(submission.get("metadataJson", {}) or {}).get("eventId", 0)):
+        for attendanceRecord in await listHonorGuardAttendees(eventId):
             lookup = await robloxUsers.fetchRobloxUser(
                 int(attendanceRecord.get("userId") or 0),
                 int(submission.get("guildId") or 0)
             )
             targetRobloxUsername = str(lookup.robloxUsername or "").strip()
-            honorGuardSheets.applyMemberPointDeltas(
+            updateResult = honorGuardSheets.applyMemberPointDeltas(
                 discordId=int(attendanceRecord.get("userId") or 0),
                 robloxUsername=targetRobloxUsername,
                 quotaDelta=attendanceRecord.get("quotaPoints") or 0,
                 promotionEventDelta=attendanceRecord.get("promotionEventPoints") or 0,
             )
+            count += 1
 
     await execute(
         """
@@ -1118,26 +1204,43 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
             """,
             (int(submissionId),),
         )
-    await _appendSubmissionEvent(
-        submissionId=int(submissionId),
-        actorId=int(submission.get("reviewerId") or 0),
-        eventType="SHEET_SYNCED",
-        fromStatus="APPROVED",
-        toStatus="APPROVED",
-        details={
+    if str(submission.get("submissionType") or "").strip().upper() == "EVENT_RECORD":
+        await _appendSubmissionEvent(
+            submissionId=int(submissionId),
+            actorId=int(submission.get("reviewerId") or 0),
+            eventType="SHEET_SYNCED",
+            fromStatus="APPROVED",
+            toStatus="APPROVED",
+            details={
+                "count": count,
+            },
+        )
+        return {
+            "alreadySynced": False,
+            "submissionId": int(submissionId),
+        }
+    else:
+        await _appendSubmissionEvent(
+            submissionId=int(submissionId),
+            actorId=int(submission.get("reviewerId") or 0),
+            eventType="SHEET_SYNCED",
+            fromStatus="APPROVED",
+            toStatus="APPROVED",
+            details={
+                "row": updateResult.row,
+                "quotaPoints": updateResult.quotaPoints,
+                "promotionTotalPoints": updateResult.promotionTotalPoints,
+            },
+        )
+        return {
+            "alreadySynced": False,
+            "submissionId": int(submissionId),
             "row": updateResult.row,
+            "robloxUsername": updateResult.robloxUsername,
             "quotaPoints": updateResult.quotaPoints,
+            "promotionEventPoints": updateResult.promotionEventPoints,
+            "promotionAwardedPoints": updateResult.promotionAwardedPoints,
             "promotionTotalPoints": updateResult.promotionTotalPoints,
-        },
-    )
-    return {
-        "alreadySynced": False,
-        "submissionId": int(submissionId),
-        "row": updateResult.row,
-        "robloxUsername": updateResult.robloxUsername,
-        "quotaPoints": updateResult.quotaPoints,
-        "promotionEventPoints": updateResult.promotionEventPoints,
-        "promotionAwardedPoints": updateResult.promotionAwardedPoints,
-        "promotionTotalPoints": updateResult.promotionTotalPoints,
-        "activityStatus": updateResult.activityStatus,
-    }
+            "activityStatus": updateResult.activityStatus,
+        }
+

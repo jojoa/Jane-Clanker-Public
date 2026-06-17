@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Optional, Sequence, TypedDict
 from uuid import uuid4
 
@@ -13,7 +13,7 @@ from discord.app_commands import Choice
 from discord.ext import commands
 
 import config
-from cogs.staff.honorGuardViews import HonorGuardEventFinishModal, HonorGuardEventSubmitView, HonorGuardEventView, HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView, HonorGuardEventManageView
+from cogs.staff.honorGuardViews import HonorGuardEventFinishModal, HonorGuardEventReviewView, HonorGuardEventSubmitView, HonorGuardEventView, HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView, HonorGuardEventManageView
 from features.staff.clockins.engine import ClockinEngine
 from features.staff.clockins.honorGuardAdapter import HonorGuardAdapter
 from features.staff.honorGuard import buildScaffoldStatus
@@ -48,14 +48,12 @@ def _saveRecord(interaction: discord.Interaction, user: discord.Member, eventId:
     }
     _manageObjects.append(record)
 
-def _deleteRecord(eventId: int) -> None:
+def _deleteRecord(eventId: int, type: str) -> None:
     global _manageObjects
-    _manageObjects = [r for r in _manageObjects if r["eventId"] != eventId]
+    _manageObjects = [r for r in _manageObjects if r["eventId"] != eventId or r["type"] != type]
 
 def _getRecordByEventId(eventId: int) -> ManagementRecord:
-    record = next((r for r in _manageObjects if r["eventId"] == eventId), None)
-    if record == None:
-        raise Exception(f"Management record not found for id {eventId}")
+    record = next((r for r in _manageObjects if r["eventId"] == eventId), None)  
     return record
 
 def _checkRecordByEventId(eventId: int, type: str) -> ManagementRecord | None:
@@ -161,6 +159,15 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 continue
             self.bot.add_view(
                 HonorGuardSoloSentryReviewView(self, int(row["submissionId"])),
+                message_id=messageId,
+            )
+        eventRows = await honorGuardService.listEventPendingStatuses()
+        for row in eventRows:
+            messageId = int(row.get("messageId") or 0)
+            if messageId <= 0:
+                continue
+            self.bot.add_view(
+                HonorGuardEventReviewView(self, int(row["submissionId"])),
                 message_id=messageId,
             )
 
@@ -569,16 +576,17 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             maxAttendeeLimit=99,
             eventType=event_type.value,
             eventTitle=str(event_description or "").strip(),
-            eventDate=date.today().isoformat(),
+            eventDate=datetime.now().isoformat(timespec="minutes"),
         )
         hostMemberGroup = _getMemberGroup(host)
         await self._clockInEngine.addAttendee(eventId, int(host.id), memberGroup=hostMemberGroup, participantRole="HOST", guildId=int(interaction.guild.id))
+        guild = self.bot.get_guild(int(interaction.guild.id)) 
         for supervisorId in supervisorIds:
-            user = self.bot.get_user(supervisorId)
+            user = guild.get_member(supervisorId)
             memberGroup = _getMemberGroup(user)
             await self._clockInEngine.addAttendee(eventId, supervisorId, memberGroup=memberGroup, participantRole="SUPERVISOR", guildId=int(interaction.guild.id))
         for coHostId in coHostIds:
-            user = self.bot.get_user(coHostId)
+            user = guild.get_member(coHostId)
             memberGroup = _getMemberGroup(user)
             await self._clockInEngine.addAttendee(eventId, coHostId, memberGroup=memberGroup, participantRole="COHOST", guildId=int(interaction.guild.id))
         event = await self._clockInEngine.getSession(int(eventId))
@@ -642,7 +650,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         else:
             attendees = await self._clockInEngine.listAttendees(int(event.get("eventId") or 0))
             for attendee in attendees:
-                if attendee.get("participantRole") == "COHOST" or attendee.get("participantRole") == "SUPERVISOR" and int(attendee.get("userId") or 0) == interaction.user.id:
+                if attendee.get("participantRole") == "SUPERVISOR" and int(attendee.get("userId") or 0) == interaction.user.id:
                     return True
         return False
 
@@ -679,7 +687,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             message=message,
         )
 
-    async def _collectOneOrTwoImageEvidenceMessage(
+    async def _collectTwoImageEvidenceMessage(
         self,
         *,
         channel: discord.abc.Messageable,
@@ -692,13 +700,13 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
         def check(message: discord.Message) -> bool:
             # We only accept the submitter's next message in this channel with
-            # at least one image attachment.
+            # exactly two image attachments.
             if message.author.id != userId:
                 return False
             if message.channel.id != channelId:
                 return False
             images = [att for att in message.attachments if _isImageAttachment(att)]
-            return len(images) in (1, 2)
+            return len(images) == 2
 
         try:
             message = await self.bot.wait_for("message", check=check, timeout=timeoutSec)
@@ -768,10 +776,6 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     async def openEventManage(self, interaction: discord.Interaction, eventId: int) -> None:
         lock = self._eventLocks.setdefault(eventId, asyncio.Lock())
         async with lock:
-            record = _checkRecordByEventId(eventId, "MANAGE")
-            if record != None:
-                await self._safeReply(interaction, f"This event is already being managed by {record.get('user').display_name}.")
-                return
             event = await self._clockInEngine.getSession(int(eventId))
             if not event:
                 await self._safeReply(interaction, "This event session no longer exists.")
@@ -781,6 +785,14 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 return
             if str(event.get("status") or "").upper() != "OPEN":
                 await self._safeReply(interaction, "This event is not open.")
+                return
+            submitRecord = _checkRecordByEventId(eventId, "SUBMIT")
+            if submitRecord != None:
+                await self._safeReply(interaction, f"This event is currently being submitted by {submitRecord.get('user').display_name} and cannot be managed until submission is closed.")
+                return
+            record = _checkRecordByEventId(eventId, "MANAGE")
+            if record != None:
+                await self._safeReply(interaction, f"This event is already being managed by {record.get('user').display_name}.")
                 return
             attendees = await self._clockInEngine.listAttendees(int(eventId))
             if not attendees or len(attendees) == 1: # only Host Record
@@ -854,26 +866,26 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
         await self._clockInEngine.removeAttendee(int(eventId), selectedAttendee.get("userId"))
 
-    async def closeEventManage(self, interaction: discord.Interaction, eventId: int) -> None:
+    async def closeEventManage(self, eventId: int) -> None:
         event = await self._clockInEngine.getSession(int(eventId))
         if not event:
-            await self._safeReply(interaction, "This event session no longer exists.")
             return
-        if str(event.get("status") or "").upper() != "OPEN":
-            await self._safeReply(interaction, "This event is not open.")
-            return
-        await self._updateEventMessage(eventId)
-        interaction = _getRecordByEventId(eventId).get("interaction")
-        await interaction.delete_original_response()
-        _deleteRecord(eventId)
+        record = _getRecordByEventId(eventId)
+        if record:
+            try:
+                await record.get("interaction").delete_original_response()
+                await self._updateEventMessage(eventId)
+            except:
+                pass
+        _deleteRecord(eventId, "MANAGE")
 
     async def handleEditPoints(self, interaction: discord.Interaction, eventId: int, attendee: dict, new_points: float, type: str) -> None:
         event = await self._clockInEngine.getSession(int(eventId))
         if not event:
             await self._safeReply(interaction, "This event session no longer exists.")
             return
-        if str(event.get("status") or "").upper() != "OPEN":
-            await self._safeReply(interaction, "This event is not open.")
+        if str(event.get("status") or "").upper() != "FINISHED":
+            await self._safeReply(interaction, "This event is not finished.")
             return
 
         if type == "QUOTA":
@@ -896,12 +908,21 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             if str(event.get("status") or "").upper() != "OPEN":
                 await self._safeReply(interaction, "This event is not open.")
                 return
-
+            manageRecord = _checkRecordByEventId(eventId, "MANAGE")
+            if manageRecord != None:
+                await self._safeReply(interaction, f"This event is currently being managed by {manageRecord.get('user').display_name} and cannot be submitted until management is closed.")
+                return
+            record = _checkRecordByEventId(eventId, "SUBMIT")
+            if record != None:
+                await self._safeReply(interaction, f"This event is already being submitted by {record.get('user').display_name}.")
+                return
             attendees = await self._clockInEngine.listAttendees(int(eventId))
             if not attendees or len(attendees) == 1: # only Host Record
                 await self._safeReply(interaction, "No attendees found for this event.")
                 return
-                
+            
+            await honorGuardService.setEventRecordDuration(int(eventId), durationMinutes)
+
             for attendee in attendees:
                 points = honorGuardService.calculatePointDeltas(configModule=config, memberGroup=attendee.get("memberGroup"), eventType=event.get("eventType"), participantRole=attendee.get("participantRole"), attendeeCount=len(attendees), durationMinutes=durationMinutes)
                 await honorGuardService.updateAttendeePoints(recordId=int(attendee.get("recordId")), points=points)
@@ -910,14 +931,26 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
             _saveRecord(interaction, interaction.user.id, int(eventId), "SUBMIT")
             enbed = self._clockInAdapter.buildSubmitEmbed(event, attendees)
-            view = HonorGuardEventSubmitView(self, eventId, interaction.guild.id, attendees)
+            view = HonorGuardEventSubmitView(self, interaction.user.id, eventId, interaction.guild.id, attendees)
             await interactionRuntime.safeInteractionReply(
                 interaction,
                 embed=enbed,
                 view=view,
                 ephemeral=True,
             )
-            self._clockInEngine.updateSessionStatus(int(eventId), "FINISHED")
+            await self._clockInEngine.updateSessionStatus(int(eventId), "FINISHED")
+
+    async def closeEventSubmit(self, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            return
+        record = _getRecordByEventId(eventId)
+        if record:
+            try:
+                await record.get("interaction").delete_original_response()
+            except:
+                pass
+        _deleteRecord(eventId, "SUBMIT")
 
     async def handleEventSubmit(
         self,
@@ -939,8 +972,10 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 await self._safeReply(interaction, "This event is not finished.")
                 return
 
-            await self._safeReply(interaction, "Not wired yet")
-            return
+            # await self._safeReply(interaction, "Not wired yet")
+            # return
+
+            allAttendees = await self._clockInEngine.listAttendees(int(eventId))
 
             evidenceChannelId = int(
                 getattr(
@@ -957,24 +992,23 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             if evidenceChannel is None:
                 evidenceChannel = interaction.channel
 
-            await self._safeReply(interaction, f"Upload one or two event screenshots in <#{evidenceChannelId}> within 3 minutes.")
+            await self._safeReply(interaction, f"Upload two event screenshots in <#{evidenceChannel.id}> within 3 minutes.")
             
             # We reuse the evidence collector so solo/group flows behave the same.
-            evidenceMessage = await self._collectOneOrTwoImageEvidenceMessage(
+            evidenceMessage = await self._collectTwoImageEvidenceMessage(
                 channel=evidenceChannel,
                 userId=interaction.user.id,
             )
             if evidenceMessage is None:
                 await interaction.followup.send(
-                    "Timed out waiting for one or two image screenshots. Event is still open.",
+                    "Timed out waiting for two image screenshots. Event is still open.",
                     ephemeral=True,
                 )
                 return
-
             imageUrls = _evidenceLinks(evidenceMessage.attachments)
-
+            await evidenceMessage.delete()
             submissionId = await honorGuardService.createEventSubmission(
-                eventRecordId=int(eventId),
+                eventId=int(eventId),
                 event=event,
                 submitterId=int(interaction.user.id),
                 imageUrls=imageUrls,
@@ -988,14 +1022,14 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 )
                 return
 
-            embed = honorGuardRendering.buildEventReviewEmbed(submission)
+            embed = honorGuardRendering.buildEventReviewEmbed(submission, event, allAttendees)
             reviewView = HonorGuardEventReviewView(self, submissionId)
             reviewMessage = await self._postHonorGuardForReview(
                 guild=interaction.guild,
                 fallbackChannel=interaction.channel,
                 embed=embed,
                 view=reviewView,
-                reviewChannelId=int(getattr(config, "honorGuardEventReviewChannelId", 0) or 0),
+                reviewChannelId=int(getattr(config, "honorGuardReviewChannelId", 0) or 0),
             )
             if not reviewMessage:
                 await interaction.followup.send(
@@ -1007,21 +1041,19 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             await honorGuardService.setSubmissionMessageId(
                 submissionId,
                 reviewMessage.id,
-                getattr(reviewMessage.channel, "id", None),
             )
             await self._clockInEngine.updateSessionStatus(int(eventId), "SUBMITTED")
-            if isinstance(interaction.message, discord.Message):
-                await self._deleteEventClockinMessage(event, message=interaction.message)
-            else:
-                await self._deleteEventClockinMessage(event)
+
+            await self._deleteEventClockinMessage(event)
 
             await interaction.followup.send(
                 "Event submitted for review.",
                 ephemeral=True,
             )
-            interaction = _getRecordByEventId(eventId).get("interaction")
-            await interaction.delete_original_response()
-            _deleteRecord(eventId)
+            record = _getRecordByEventId(eventId)
+            if record:
+                await record.get("interaction").delete_original_response()
+            _deleteRecord(eventId, "SUBMIT")
 
     async def _postHonorGuardForReview(
         self,

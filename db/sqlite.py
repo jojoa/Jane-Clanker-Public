@@ -1255,6 +1255,7 @@ async def initDb():
             status TEXT NOT NULL DEFAULT 'OPEN', -- OPEN/FINISHED/SUBMITTED/CANCELED
             startedAt TEXT,
             finishedAt TEXT,
+            durationMinutes INTEGER NOT NULL DEFAULT 0,
             createdBy INTEGER NOT NULL DEFAULT 0,
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
         );

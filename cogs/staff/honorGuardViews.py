@@ -435,6 +435,203 @@ class HonorGuardSoloSentryReviewView(discord.ui.View):
     async def rejectBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._finishDecision(interaction, status="REJECTED", note=None)
 
+class HonorGuardEventReviewView(discord.ui.View):
+    def __init__(self, cog: "HonorGuardCog", submissionId: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.submissionId = int(submissionId)
+        self._lock = asyncio.Lock()
+
+    async def _getSubmission(self) -> Optional[dict]:
+        return await honorGuardService.getEventSubmission(self.submissionId)
+
+    async def _getEvent(self, eventId: int) -> Optional[dict]:
+        return await honorGuardService.getEventRecord(eventId)
+
+    async def _getAllAttendees(self, eventId: int) -> list[dict]:
+        return await honorGuardService.listHonorGuardAttendees(int(eventId))
+
+    async def _canReview(self, member: discord.Member) -> bool:
+        submission = await self._getSubmission()
+        reviewerRoleId = int(getattr(config, "honorGuardReviewerRoleId", 0) or 0)
+        if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
+            return True
+        if reviewerRoleId <= 0:
+            return False
+        if member.id == submission.get("submitterId"):
+            return False
+        if member.id == submission.get("targetUserId"):
+            return False
+        return _hasRole(member, reviewerRoleId)
+
+    async def _updateSubmissionStatus(
+        self,
+        *,
+        status: str,
+        reviewerId: int,
+        note: Optional[str],
+        threadId: Optional[int],
+    ) -> None:
+        submission = await self._getSubmission()
+        await honorGuardService.updateEventSubmissionStatus(
+            self.submissionId,
+            submission.get("eventId") or 0,
+            status,
+            reviewerId=reviewerId,
+            note=note,
+            threadId=threadId,
+        )
+
+    async def _syncApprovedSubmission(self, eventId: int) -> dict:
+        result = await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId)
+        await honorGuardService.syncEventRecordToSheets(eventId)
+        return result
+
+    async def _logHonorGuardSheetChange(
+        self,
+        *,
+        reviewerId: int,
+        change: str,
+        details: str,
+    ) -> None:
+        await honorGuardOutputs.sendHonorGuardSheetChangeLog(
+            self.cog.bot,
+            reviewerId=reviewerId,
+            change=change,
+            details=details,
+        )
+
+    async def _buildSubmissionEmbed(self) -> Optional[discord.Embed]:
+        submission = await self._getSubmission()
+        event = await self._getEvent(int(submission.get("eventId") or 0))
+        allAttendees = await self._getAllAttendees(int(submission.get("eventId") or 0))
+        if not submission or not event or not allAttendees:
+            return None
+        return honorGuardRendering.buildEventReviewEmbed(submission, event, allAttendees)
+
+    async def _finishDecision(
+        self,
+        interaction: discord.Interaction,
+        *,
+        status: str,
+        note: Optional[str],
+    ) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            await _safeInteractionReply(
+                interaction,
+                "This action can only be used inside a server.",
+                ephemeral=True,
+            )
+            return
+        if not await self._canReview(interaction.user):
+            await _safeInteractionReply(
+                interaction,
+                "You are not authorized to review this event submission.",
+                ephemeral=True,
+            )
+            return
+
+        async with self._lock:
+            submission = await self._getSubmission()
+            if not submission:
+                await _safeInteractionReply(interaction, "Event submission not found.", ephemeral=True)
+                return
+
+            if submission.get("status") in {"APPROVED", "REJECTED", "CANCELED"}:
+                await _safeInteractionReply(
+                    interaction,
+                    "This submission has already been finalized.",
+                    ephemeral=True,
+                )
+                return
+
+            await _safeInteractionDefer(interaction, ephemeral=True, thinking=True)
+
+            previousState = [child.disabled for child in self.children]
+            _setAllButtonsDisabled(self, True)
+            if isinstance(interaction.message, discord.Message):
+                try:
+                    await interaction.message.edit(view=self)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            try:
+                await self._updateSubmissionStatus(
+                    status=status,
+                    reviewerId=interaction.user.id,
+                    note=note,
+                    threadId=None,
+                )
+
+                if status == "APPROVED":
+                    syncResult = await self._syncApprovedSubmission(submission.get("eventId") or 0)
+                    submission = await self._getSubmission()
+                    allAttendees = await self._getAllAttendees(int(submission.get("eventId") or 0))
+                    if submission:
+                        syncStatusText = "already synced" if syncResult.get("alreadySynced") else "synced now"
+                        await self._logHonorGuardSheetChange(
+                            reviewerId=interaction.user.id,
+                            change="Edited Honor Guard points for an approved event submission.",
+                            details=(
+                                f"Host: <@{int(submission.get('targetUserId') or 0)}> | "
+                                f"Participants: {len(allAttendees)} | "
+                                f"Date: {submission.get('eventDate') or 'N/A'} | "
+                                f"Sheet: {syncStatusText}"
+                            ),
+                        )
+
+                _setAllButtonsDisabled(self, True)
+
+                if isinstance(interaction.message, discord.Message):
+                    embed = await self._buildSubmissionEmbed()
+                    try:
+                        if embed:
+                            await interaction.message.edit(embed=embed, view=self)
+                        else:
+                            await interaction.message.edit(view=self)
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+
+                if status == "APPROVED":
+                    await _safeInteractionReply(interaction, "Event submission approved.", ephemeral=True)
+                elif status == "REJECTED":
+                    await _safeInteractionReply(interaction, "Event submission rejected.", ephemeral=True)
+                else:
+                    await _safeInteractionReply(
+                        interaction,
+                        "Event submission status updated.",
+                        ephemeral=True,
+                    )
+            except Exception as exc:
+                for idx, child in enumerate(self.children):
+                    child.disabled = previousState[idx] if idx < len(previousState) else False
+                if isinstance(interaction.message, discord.Message):
+                    try:
+                        await interaction.message.edit(view=self)
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+                log.exception("Failed to process event submission review decision.")
+                await _safeInteractionReply(
+                    interaction,
+                    f"Could not process this action: {exc}",
+                    ephemeral=True,
+                )
+
+    @discord.ui.button(
+        label="Approve",
+        style=discord.ButtonStyle.success,
+        custom_id="honorGuard_event_review:approve",
+    )
+    async def approveBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._finishDecision(interaction, status="APPROVED", note=None)
+
+    @discord.ui.button(
+        label="Reject",
+        style=discord.ButtonStyle.danger,
+        custom_id="honorGuard_event_review:reject",
+    )
+    async def rejectBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._finishDecision(interaction, status="REJECTED", note=None)
 
 class HonorGuardEventView(discord.ui.View):
     def __init__(self, cog: "HonorGuardCog", eventId: int):
@@ -468,7 +665,9 @@ class HonorGuardEventView(discord.ui.View):
     )
     async def finishBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         # TODO Implement Time Selection
-        await self.cog.openSubmitEvent(interaction, self.eventId, 60)
+        event = await self.cog._clockInEngine.getSession(self.eventId)
+        await interaction.response.send_modal(HonorGuardEventFinishModal(self.cog, event))
+        #await self.cog.openSubmitEvent(interaction, self.eventId, 60)
 
     @discord.ui.button(
         style=discord.ButtonStyle.success,
@@ -479,9 +678,9 @@ class HonorGuardEventView(discord.ui.View):
     async def joinBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.cog.handleEventJoin(interaction, self.eventId)
 
-class HonorGuardEventSubmitView(discord.ui.View):
-    def __init__(self, cog: "HonorGuardCog", eventId: int, guildId: int, attendees: list[dict]):
-        super().__init__(timeout=None)
+class HonorGuardEventSubmitView(runtimeViewBases.OwnerLockedView):
+    def __init__(self, cog: "HonorGuardCog", userId: int, eventId: int, guildId: int, attendees: list[dict]):
+        super().__init__(openerId=userId, timeout=90)
         self.cog = cog
         self.eventId = int(eventId)
         self.guild = self.cog.bot.get_guild(int(guildId)) 
@@ -500,11 +699,12 @@ class HonorGuardEventSubmitView(discord.ui.View):
         self.quotaPointsBtn.disabled = True
         self.eventPointsBtn.disabled = True
 
+    async def on_timeout(self) -> None:
+        await self.cog.closeEventSubmit(self.eventId)
+
     def _refreshSectionOptions(self) -> None:
         options: list[discord.SelectOption] = []
         for attendee in self.attendees:
-            if attendee.get("participantRole", "").upper() == "HOST":
-                continue
             label = _memberDisplayName(self.guild.get_member(attendee.get("userId")))
             default = str(attendee.get("userId")) == str(self.selectedUserId)
             options.append(
@@ -651,13 +851,12 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
         placeholder="Example: 45",
     )
 
-    def __init__(self, cog: "HonorGuardCog", eventId: int):
+    def __init__(self, cog: "HonorGuardCog", event: dict):
         super().__init__()
         self.cog = cog
-        self.eventId = int(eventId)
-        event = honorGuardService.getEventRecord(self.eventId)
-        startedAt = event.get("startedAt") if event else datetime.now(datetime.timezone.utc)
-        finishedAt = event.get("finishedAt") if event else datetime.now(datetime.timezone.utc)
+        self.eventId = int(event.get("eventId"))
+        startedAt: datetime = event.get("startedAt")
+        finishedAt = datetime.now()
         duration = finishedAt - startedAt
         minutes = int(duration.total_seconds() // 60)
         self.durationMinutesInput.default = str(minutes)
@@ -677,7 +876,7 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
 
 class HonorGuardEventManageView(runtimeViewBases.OwnerLockedView):
     def __init__(self, cog: "HonorGuardCog", eventId: int, guildId: int, userId: int, attendees: list[dict]):
-        super().__init__(openerId=userId, timeout=900)
+        super().__init__(openerId=userId, timeout=60)
         self.cog = cog
         self.eventId = int(eventId)
         self.guild = self.cog.bot.get_guild(int(guildId))
@@ -697,6 +896,9 @@ class HonorGuardEventManageView(runtimeViewBases.OwnerLockedView):
         self.assignCohostsBtn.disabled = True
         self.assignSupervisorsBtn.disabled = True
         self.removeAttendeesBtn.disabled = True
+
+    async def on_timeout(self) -> None:
+        await self.cog.closeEventManage(self.eventId)
 
     def _refreshSectionOptions(self) -> None:
         options: list[discord.SelectOption] = []
@@ -825,4 +1027,4 @@ class HonorGuardEventManageView(runtimeViewBases.OwnerLockedView):
         custom_id="honorguard_event_manage:done",
     )
     async def doneBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.closeEventManage(interaction, self.eventId)
+        await self.cog.closeEventManage(self.eventId)

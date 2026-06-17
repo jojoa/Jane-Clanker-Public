@@ -359,7 +359,7 @@ def archiveEvent(record: HonorGuardArchiveRecord, *, configModule: Any = config)
             "notes",
         ]
     valuesByKey = {
-        "eventType": record.eventType,
+        "eventType": record.eventType.title(),
         "eventTimeUtc": record.eventTimeUtc,
         "eventDate": record.eventTimeUtc,
         "eventTitle": record.eventTitle,

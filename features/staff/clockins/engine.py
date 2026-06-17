@@ -141,7 +141,7 @@ class ClockinEngine:
         view = viewFactory(int(sessionId))
         normalized = self.adapter.normalizeSession(session)
         status = str(normalized.get("status") or "OPEN").upper()
-        if status != "OPEN":
+        if status != "OPEN" and status != "FINISHED":
             _setAllButtonsDisabled(view, True)
 
         targetMessage = await self._resolveMessageFromSession(session, message=message)
