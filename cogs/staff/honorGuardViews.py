@@ -466,10 +466,10 @@ class HonorGuardEventReviewView(discord.ui.View):
             return True
         if reviewerRoleId <= 0:
             return False
-        if member.id == submission.get("submitterId"):
-            return False
-        if member.id == submission.get("targetUserId"):
-            return False
+        # if member.id == submission.get("submitterId"):
+        #     return False
+        # if member.id == submission.get("targetUserId"):
+        #     return False
         return _hasRole(member, reviewerRoleId)
 
     async def _updateSubmissionStatus(
@@ -682,9 +682,9 @@ class HonorGuardEventView(discord.ui.View):
         custom_id="honorguard_event:finish",
     )
     async def finishBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        # TODO Implement Time Selection
-        event = await self.cog._clockInEngine.getSession(self.eventId)
-        await interaction.response.send_modal(HonorGuardEventFinishModal(self.cog, event))
+        #event = await self.cog._clockInEngine.getSession(self.eventId)
+        #await interaction.response.send_modal(HonorGuardEventFinishModal(self.cog, event))
+        await self.cog.openTimeModal(interaction, self.eventId)
         #await self.cog.openSubmitEvent(interaction, self.eventId, 60)
 
     @discord.ui.button(
@@ -870,7 +870,7 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
     )
 
     def __init__(self, cog: "HonorGuardCog", event: dict):
-        super().__init__()
+        super().__init__(timeout=30)
         self.cog = cog
         self.eventId = int(event.get("eventId"))
         startedAt: datetime = event.get("startedAt")
@@ -879,6 +879,9 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
         minutes = int(duration.total_seconds() // 60)
         self.durationMinutesInput.default = str(minutes)
         self.durationMinutesInput.placeholder = f"Default: {minutes}"
+
+    async def on_timeout(self) -> None:
+        await self.cog.timeoutTimeModal(self.eventId)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         raw = str(self.durationMinutesInput.value or "").strip()

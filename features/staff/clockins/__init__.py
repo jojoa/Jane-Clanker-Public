@@ -1,10 +1,10 @@
 from .engine import ClockinEngine, resolveAttendeeUserIdFromToken
-from .honorGuardEventAdapter import HonorGuardEventClockinAdapter
+from .honorGuardAdapter import HonorGuardAdapter
 from .orientationAdapter import OrientationClockinAdapter
 
 __all__ = [
     "ClockinEngine",
     "resolveAttendeeUserIdFromToken",
     "OrientationClockinAdapter",
-    "HonorGuardEventClockinAdapter",
+    "HonorGuardAdapter",
 ]

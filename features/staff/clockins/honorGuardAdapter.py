@@ -85,11 +85,11 @@ class HonorGuardAdapter:
         embed.add_field(name="Host", value=f"<@{normalized['hostId']}>", inline=False)
         embed.add_field(
             name=f"Supervisors ({len(supervisorMentions)})",
-            value=", ".join(supervisorMentions) if supervisorMentions else "No supervisors assigned.",
+            value="\n".join(supervisorMentions) if supervisorMentions else "No supervisors assigned.",
             inline=False)
         embed.add_field(
             name=f"Cohosts ({len(cohostMentions)})",
-            value=", ".join(cohostMentions) if cohostMentions else "No cohosts assigned.",
+            value="\n".join(cohostMentions) if cohostMentions else "No cohosts assigned.",
             inline=False)
         embed.add_field(
             name=f"Attendees ({len(attendeeMentions)})",
@@ -129,11 +129,11 @@ class HonorGuardAdapter:
         embed.add_field(name="Host", value=f"<@{normalized['hostId']}>", inline=False)
         embed.add_field(
             name=f"Supervisors ({len(supervisorMentions)})",
-            value=", ".join(supervisorMentions) if supervisorMentions else "No supervisors assigned.",
+            value="\n".join(supervisorMentions) if supervisorMentions else "No supervisors assigned.",
             inline=False)
         embed.add_field(
             name=f"Cohosts ({len(cohostMentions)})",
-            value=", ".join(cohostMentions) if cohostMentions else "No cohosts assigned.",
+            value="\n".join(cohostMentions) if cohostMentions else "No cohosts assigned.",
             inline=False)
         embed.add_field(
             name=f"Attendees ({len(attendeeMentions)})",

@@ -78,14 +78,6 @@ def buildSoloSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Emb
         value=_formatPoints(submission.get("promotionEventPoints")),
         inline=True,
     )
-    if isinstance(imageUrls, list) and imageUrls:
-        preview = "\n".join(
-            f"[Screenshot {index + 1}]({str(url).strip()})"
-            for index, url in enumerate(imageUrls[:6])
-            if str(url).strip()
-        )
-        if preview:
-            embed.add_field(name="Evidence", value=_clip(preview), inline=False)
     embed.add_field(name="Status", value=statusIcon(str(submission.get("status") or "")), inline=False)
     return embed
 
@@ -140,14 +132,6 @@ def buildEventReviewEmbed(submission: dict, event: dict, allAttendees: list[dict
         value="\n".join(attendeeMentions) if attendeeMentions else "No attendees yet.",
         inline=False,
     )
-    if isinstance(imageUrls, list) and imageUrls:
-        preview = "\n".join(
-            f"[Screenshot {index + 1}]({str(url).strip()})"
-            for index, url in enumerate(imageUrls[:6])
-            if str(url).strip()
-        )
-        if preview:
-            embed.add_field(name="Evidence", value=_clip(preview), inline=False)
     reviewerMention = "N/A"
     if submission.get("status") != "PENDING":
         reviewerMention = _mentionUser(submission.get("reviewerId"))
