@@ -484,8 +484,8 @@ class HonorGuardEventReviewView(discord.ui.View):
 
     async def _syncApprovedSubmission(self, eventId: int) -> dict:
         result = await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId)
-        await honorGuardService.syncEventRecordToSheets(eventId)
-        return result
+        hostUpdate = await honorGuardService.syncEventRecordToSheets(eventId)
+        return {**result, "eventHostUpdate": hostUpdate.get("eventHostUpdate") != None, "archiveSynced": hostUpdate.get("archiveSynced")}
 
     async def _logHonorGuardSheetChange(
         self,
@@ -574,8 +574,10 @@ class HonorGuardEventReviewView(discord.ui.View):
                             change="Edited Honor Guard points for an approved event submission.",
                             details=(
                                 f"Host: <@{int(submission.get('targetUserId') or 0)}> | "
-                                f"Participants: {len(allAttendees)} | "
+                                f"Participants: {len(allAttendees)-1} | "
                                 f"Date: {submission.get('eventDate') or 'N/A'} | "
+                                f"Archived: {syncResult.get('archiveSynced') or False} | "
+                                f"Host Update: {syncResult.get('eventHostUpdate') or False} | "
                                 f"Sheet: {syncStatusText}"
                             ),
                         )

@@ -948,9 +948,10 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         if record:
             try:
                 await record.get("interaction").delete_original_response()
+                await self._clockInEngine.updateSessionStatus(int(eventId), "OPEN")
+                _deleteRecord(eventId, "SUBMIT")
             except:
                 pass
-        _deleteRecord(eventId, "SUBMIT")
 
     async def handleEventSubmit(
         self,
@@ -1006,7 +1007,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 )
                 return
             imageUrls = _evidenceLinks(evidenceMessage.attachments)
-            await evidenceMessage.delete()
+            #await evidenceMessage.delete()
             submissionId = await honorGuardService.createEventSubmission(
                 eventId=int(eventId),
                 event=event,

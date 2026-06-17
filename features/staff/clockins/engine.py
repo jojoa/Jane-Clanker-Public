@@ -141,14 +141,11 @@ class ClockinEngine:
         view = viewFactory(int(sessionId))
         normalized = self.adapter.normalizeSession(session)
         status = str(normalized.get("status") or "OPEN").upper()
-        if status != "OPEN" and status != "FINISHED":
+        if status != "OPEN":
             _setAllButtonsDisabled(view, True)
 
         targetMessage = await self._resolveMessageFromSession(session, message=message)
         if targetMessage is None:
-            print(normalized.get("channelId"))
-            print(normalized.get("messageId"))
-            raise Exception("Unable to resolve message for this event session.")
             return
         await interactionRuntime.safeMessageEdit(targetMessage, embed=embed, view=view)
 
@@ -160,6 +157,5 @@ class ClockinEngine:
     ) -> None:
         targetMessage = await self._resolveMessageFromSession(session, message=message)
         if targetMessage is None:
-            raise Exception("Unable to resolve message for this event session.")
             return
         await interactionRuntime.safeMessageDelete(targetMessage)
