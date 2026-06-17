@@ -169,6 +169,10 @@ anrorsRmPlusRoleId = 0  # ANRORS RM+
 # Honor Guard roles.
 honorGuardReviewerRoleId = 0
 honorGuardReviewerPingRoleId = 0
+honorGuardSeniorGuardsmanRoleId = 0
+honorGuardPlatoonSergeantRoleId = 0
+honorGuardParadeOfficerPlusRoleIds = []
+honorGuardRoleId = 0
 
 # ANRD role placeholders (for future role -> ORBAT rank sync).
 anrdRoleProbationaryId = 0

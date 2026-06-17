@@ -1,39 +1,76 @@
 from __future__ import annotations
 
-import logging
-from datetime import date
-from typing import Optional, Sequence
+import asyncio
+import re
+
+from datetime import date, datetime, timezone
+from typing import Optional, Sequence, TypedDict
+from uuid import uuid4
 
 import discord
 from discord import app_commands
+from discord.app_commands import Choice
 from discord.ext import commands
 
 import config
-from cogs.staff.honorGuardViews import (
-    HonorGuardEventClockinView,
-    HonorGuardEventManageModal,
-    HonorGuardPointAwardReviewView,
-    HonorGuardSentryReviewView,
-)
-from features.staff.clockins import ClockinEngine, resolveAttendeeUserIdFromToken
-from features.staff.clockins.honorGuardEventAdapter import HonorGuardEventClockinAdapter
+from cogs.staff.honorGuardViews import HonorGuardEventFinishModal, HonorGuardEventReviewView, HonorGuardEventSubmitView, HonorGuardEventView, HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView, HonorGuardEventManageView
+from features.staff.clockins.engine import ClockinEngine
+from features.staff.clockins.honorGuardAdapter import HonorGuardAdapter
 from features.staff.honorGuard import buildScaffoldStatus
 from features.staff.honorGuard import rendering as honorGuardRendering
 from features.staff.honorGuard import service as honorGuardService
 from runtime import cogGuards as runtimeCogGuards
 from runtime import interaction as interactionRuntime
 from runtime import normalization
-from runtime import orbatAudit as orbatAuditRuntime
 from runtime import permissions as runtimePermissions
 
-log = logging.getLogger(__name__)
-
 PLUGIN_MANIFEST = {
-    "displayName": "Honor-Guard",
+    "displayName": "Honor Guard",
     "category": "staff",
-    "description": "Honor-Guard ORBAT integration status and review-flow backend.",
+    "description": "Honor Guard ORBAT integration status and review-flow backend.",
 }
 
+_userIdRegex = re.compile(r"\d{15,22}")
+class ManagementRecord(TypedDict):
+    eventId: int
+    user: discord.Member
+    interaction: discord.Interaction
+    type: str
+
+_manageObjects: list[ManagementRecord] = []
+
+def _saveRecord(interaction: discord.Interaction, user: discord.Member, eventId: int, type: str) -> None:
+    record: ManagementRecord = {
+        "eventId": eventId,
+        "user": user,
+        "interaction": interaction,
+        "type": type,
+    }
+    _manageObjects.append(record)
+
+def _deleteRecord(eventId: int, type: str) -> None:
+    global _manageObjects
+    _manageObjects = [r for r in _manageObjects if r["eventId"] != eventId or r["type"] != type]
+
+def _getRecordByEventId(eventId: int) -> ManagementRecord:
+    record = next((r for r in _manageObjects if r["eventId"] == eventId), None)  
+    return record
+
+def _checkRecordByEventId(eventId: int, type: str) -> ManagementRecord | None:
+    record = next((r for r in _manageObjects if r["eventId"] == eventId and r["type"] == type), None)
+    return record
+
+def _getMemberGroup(member: discord.Member) -> str:
+    honorGuardOfficerRoleIds = _normalizeRoleIdList(getattr(config, "honorGuardOfficerRoleIds", []))
+    honorGuardNcoRoleIds = _normalizeRoleIdList(getattr(config, "honorGuardNcoRoleIds", []))
+    honorGuardEnlistedRoleIds = _normalizeRoleIdList(getattr(config, "honorGuardEnlistedRoleIds", []))
+    if runtimePermissions.hasAnyRole(member, honorGuardOfficerRoleIds):
+        return "OFFICER"
+    if runtimePermissions.hasAnyRole(member, honorGuardNcoRoleIds):
+        return "NCO"
+    if runtimePermissions.hasAnyRole(member, honorGuardEnlistedRoleIds):
+        return "ENLISTED"
+    raise Exception(f"Member {member.id} does not have any valid Honor Guard rank roles.")
 
 def _displayChannel(channelId: int) -> str:
     return f"<#{channelId}>" if int(channelId or 0) > 0 else "`not set`"
@@ -77,31 +114,110 @@ def _hasRole(member: discord.Member, roleId: Optional[int]) -> bool:
 def _normalizeRoleIdList(rawValues: object) -> set[int]:
     return normalization.normalizeIntSet(rawValues)
 
+def _toPositiveInt(value: object, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return parsed if parsed > 0 else int(default)
+
+def _parseUserIdList(rawText: str) -> list[int]:
+    out: list[int] = []
+    for match in _userIdRegex.findall(str(rawText or "")):
+        parsed = _toPositiveInt(match)
+        if parsed <= 0 or parsed in out:
+            continue
+        out.append(parsed)
+    return out
+
 
 class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._eventClockinAdapter = HonorGuardEventClockinAdapter()
-        self._eventClockinEngine = ClockinEngine(bot, self._eventClockinAdapter)
-
+        self._eventLocks: dict[int, asyncio.Lock] = {}
+        self._clockInAdapter = HonorGuardAdapter()
+        self._clockInEngine = ClockinEngine(bot, self._clockInAdapter)
+        
     async def cog_load(self) -> None:
-        await self._eventClockinEngine.restoreOpenViews(
-            lambda sessionId: HonorGuardEventClockinView(self, sessionId),
+        await self._restoreReviewViews()
+        await self._restoreEventViews()
+
+    async def _restoreReviewViews(self) -> None:
+        pointAwardRows = await honorGuardService.listPointAwardPendingStatuses()
+        for row in pointAwardRows:
+            messageId = int(row.get("messageId") or 0)
+            if messageId <= 0:
+                continue
+            self.bot.add_view(
+                HonorGuardPointAwardReviewView(self, int(row["submissionId"])),
+                message_id=messageId,
+            )
+        soloSentryRows = await honorGuardService.listSoloSentryPendingStatuses()
+        for row in soloSentryRows:
+            messageId = int(row.get("messageId") or 0)
+            if messageId <= 0:
+                continue
+            self.bot.add_view(
+                HonorGuardSoloSentryReviewView(self, int(row["submissionId"])),
+                message_id=messageId,
+            )
+        eventRows = await honorGuardService.listEventPendingStatuses()
+        for row in eventRows:
+            messageId = int(row.get("messageId") or 0)
+            if messageId <= 0:
+                continue
+            self.bot.add_view(
+                HonorGuardEventReviewView(self, int(row["submissionId"])),
+                message_id=messageId,
+            )
+
+    async def _restoreEventViews(self) -> None:
+        await self._clockInEngine.restoreOpenViews(
+            lambda eventId: HonorGuardEventView(self, eventId),
         )
 
-    def _canAwardPoints(self, member: discord.Member) -> bool:
+    def _isInHonorGuard(self, member: discord.Member) -> bool:
+        honorGuardRoleIds = int(getattr(config, "honorGuardRoleId", 0) or 0)
+        if not honorGuardRoleIds:
+            return False
+        return _hasRole(member, honorGuardRoleIds)
+
+    def _canAwardPoints(self, member: discord.Member, awarded_user: discord.Member) -> bool:
+        if member.id == awarded_user.id:
+            return True
         honorGuardReviewerRoleId = int(getattr(config, "honorGuardReviewerRoleId", 0) or 0)
         if honorGuardReviewerRoleId <= 0:
             return True
         return _hasRole(member, honorGuardReviewerRoleId)
 
-    def _canHostEventClockin(self, member: discord.Member) -> bool:
-        configuredRoleIds = _normalizeRoleIdList(getattr(config, "honorGuardEventHostRoleIds", []))
-        if configuredRoleIds:
-            return any(role.id in configuredRoleIds for role in member.roles)
-        if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
-            return True
-        return self._canAwardPoints(member)
+    def _canCreateClockIn(self, member: discord.Member, event_type: str) -> bool:
+        sgmRole = int(getattr(config, "honorGuardSeniorGuardsmanRoleId", 0) or 0)
+        psRole = int(getattr(config, "honorGuardPlatoonSergeantRoleId", 0) or 0)
+        poPlusRoles = getattr(config, "honorGuardParadeOfficerPlusRoleIds", []) or []
+        ccRole = int(getattr(config, "honorGuardReviewerRoleId", 0) or 0)
+        allowed = False
+        needsCC = False
+        if event_type == "orientation":
+            requiredRoleIds = [sgmRole, psRole, *poPlusRoles]
+        elif event_type == "sentry":
+            requiredRoleIds = [*poPlusRoles]
+        elif event_type == "drill":
+            requiredRoleIds = [psRole, *poPlusRoles]
+        elif event_type == "jge":
+            requiredRoleIds = [psRole, *poPlusRoles]
+            needsCC = True
+        elif event_type == "nco":
+            requiredRoleIds = [*poPlusRoles]
+            needsCC = True
+        else:
+            requiredRoleIds = [*poPlusRoles]
+        for roleId in requiredRoleIds:
+            if roleId != 0 and _hasRole(member, roleId):
+                allowed = True
+                break
+        if needsCC and not _hasRole(member, ccRole):
+            allowed = False
+        return allowed
 
     def _honorGuardCommandGuildIds(self) -> set[int]:
         configuredGuildIds = _normalizeRoleIdList(getattr(config, "honorGuardCommandGuildIds", []))
@@ -126,7 +242,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             return True
         await self._safeReply(
             interaction,
-            "Honor-Guard commands can only be used in the CE server or configured test servers.",
+            "Honor Guard commands can only be used in the CE server or configured test servers.",
         )
         return False
 
@@ -138,16 +254,6 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             or getattr(member, "name", None)
             or member.id
         ).strip()
-
-    @staticmethod
-    def _parseUserIdList(raw: str) -> list[int]:
-        values: list[int] = []
-        for token in str(raw or "").replace(",", " ").split():
-            userId = normalization.parseDiscordUserId(token)
-            if userId <= 0 or userId in values:
-                continue
-            values.append(userId)
-        return values
 
     async def _resolveReviewChannel(
         self,
@@ -167,237 +273,9 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 return channel
         return fallback
 
-    async def _updateEventClockinMessage(
-        self,
-        sessionId: int,
-        *,
-        message: Optional[discord.Message] = None,
-    ) -> None:
-        await self._eventClockinEngine.updateClockinMessage(
-            int(sessionId),
-            viewFactory=lambda resolvedSessionId: HonorGuardEventClockinView(self, resolvedSessionId),
-            message=message,
-        )
-
-    async def _deleteEventClockinMessage(
-        self,
-        session: dict,
-        *,
-        message: Optional[discord.Message] = None,
-    ) -> None:
-        await self._eventClockinEngine.deleteClockinMessage(
-            session,
-            message=message,
-        )
-
-    async def _refreshEventClockinMessageFromInteraction(
-        self,
-        sessionId: int,
-        interaction: discord.Interaction,
-    ) -> None:
-        if isinstance(interaction.message, discord.Message):
-            await self._updateEventClockinMessage(sessionId, message=interaction.message)
-            return
-        await self._updateEventClockinMessage(sessionId)
-
-    async def _isEventHost(self, interaction: discord.Interaction, session: dict) -> bool:
-        return interaction.user.id == int(session.get("hostId") or 0)
-
-    async def openHonorGuardEventManage(self, interaction: discord.Interaction, sessionId: int) -> None:
-        session = await self._eventClockinEngine.getSession(int(sessionId))
-        if not session:
-            await self._safeReply(interaction, "This Honor-Guard event clock-in no longer exists.")
-            return
-        if not await self._isEventHost(interaction, session):
-            await self._safeReply(interaction, "Only the event host can manage attendees.")
-            return
-        if str(session.get("status") or "").upper() != "OPEN":
-            await self._safeReply(interaction, "This Honor-Guard event is no longer open.")
-            return
-        attendees = await self._eventClockinEngine.listAttendees(int(sessionId))
-        if not attendees:
-            await self._safeReply(interaction, "No attendees are currently clocked in.")
-            return
-        await interactionRuntime.safeInteractionSendModal(
-            interaction,
-            HonorGuardEventManageModal(self, int(sessionId)),
-        )
-
-    async def handleHonorGuardEventManage(
-        self,
-        interaction: discord.Interaction,
-        sessionId: int,
-        token: str,
-    ) -> None:
-        session = await self._eventClockinEngine.getSession(int(sessionId))
-        if not session:
-            await self._safeReply(interaction, "This Honor-Guard event clock-in no longer exists.")
-            return
-        if not await self._isEventHost(interaction, session):
-            await self._safeReply(interaction, "Only the event host can manage attendees.")
-            return
-        attendees = await self._eventClockinEngine.listAttendees(int(sessionId))
-        if not attendees:
-            await self._safeReply(interaction, "No attendees are currently clocked in.")
-            return
-        targetUserId = resolveAttendeeUserIdFromToken(token, attendees)
-        if not targetUserId:
-            await self._safeReply(interaction, "Could not match that attendee in this event.")
-            return
-        await self._eventClockinEngine.removeAttendee(int(sessionId), int(targetUserId))
-        await self._safeReply(interaction, f"Removed <@{int(targetUserId)}> from this event.")
-        await self._refreshEventClockinMessageFromInteraction(int(sessionId), interaction)
-
-    async def handleHonorGuardEventJoin(self, interaction: discord.Interaction, sessionId: int) -> None:
-        if interaction.user.bot:
-            await self._safeReply(interaction, "Bots cannot clock in to Honor-Guard events.")
-            return
-        session = await self._eventClockinEngine.getSession(int(sessionId))
-        if not session:
-            await self._safeReply(interaction, "This Honor-Guard event clock-in no longer exists.")
-            return
-        if str(session.get("status") or "").upper() != "OPEN":
-            await self._safeReply(interaction, "This Honor-Guard event is no longer open.")
-            return
-        if interaction.user.id == int(session.get("hostId") or 0):
-            await self._safeReply(interaction, "You are already listed as the host for this event.")
-            return
-        if int(interaction.user.id) in set(session.get("coHostUserIds") or []):
-            await self._safeReply(interaction, "You are already listed as a co-host for this event.")
-            return
-        if int(interaction.user.id) in set(session.get("supervisorUserIds") or []):
-            await self._safeReply(interaction, "You are already listed as a supervisor for this event.")
-            return
-        attendees = await self._eventClockinEngine.listAttendees(int(sessionId))
-        attendeeUserIds = {int(row.get("userId") or 0) for row in attendees}
-        if int(interaction.user.id) in attendeeUserIds:
-            await self._safeReply(interaction, "You are already clocked in to this event.")
-            return
-        maxAttendeeLimit = max(1, int(session.get("maxAttendeeLimit") or 30))
-        if len(attendeeUserIds) >= maxAttendeeLimit:
-            await self._safeReply(interaction, "This Honor-Guard event has reached its attendee limit.")
-            return
-        await self._eventClockinEngine.addAttendee(int(sessionId), int(interaction.user.id))
-        await self._safeReply(interaction, "You have been added to this Honor-Guard event.")
-        await self._refreshEventClockinMessageFromInteraction(int(sessionId), interaction)
-
-    async def handleHonorGuardEventDelete(self, interaction: discord.Interaction, sessionId: int) -> None:
-        session = await self._eventClockinEngine.getSession(int(sessionId))
-        if not session:
-            await self._safeReply(interaction, "This Honor-Guard event clock-in no longer exists.")
-            return
-        if not await self._isEventHost(interaction, session):
-            await self._safeReply(interaction, "Only the event host can delete this event clock-in.")
-            return
-        await self._eventClockinEngine.updateSessionStatus(int(sessionId), "CANCELED")
-        await self._safeReply(interaction, "Honor-Guard event clock-in canceled.")
-        if isinstance(interaction.message, discord.Message):
-            await self._deleteEventClockinMessage(session, message=interaction.message)
-            return
-        await self._deleteEventClockinMessage(session)
-
-    async def handleHonorGuardEventFinish(self, interaction: discord.Interaction, sessionId: int) -> None:
-        session = await self._eventClockinEngine.getSession(int(sessionId))
-        if not session:
-            await self._safeReply(interaction, "This Honor-Guard event clock-in no longer exists.")
-            return
-        if not await self._isEventHost(interaction, session):
-            await self._safeReply(interaction, "Only the event host can finish this event clock-in.")
-            return
-        if str(session.get("status") or "").upper() != "OPEN":
-            await self._safeReply(interaction, "This Honor-Guard event is no longer open.")
-            return
-
-        await interactionRuntime.safeInteractionDefer(
-            interaction,
-            ephemeral=True,
-            thinking=True,
-        )
-        try:
-            result = await honorGuardService.finalizeEventClockinSession(
-                int(sessionId),
-                finalizedBy=int(interaction.user.id),
-            )
-        except ValueError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-            return
-        except Exception as exc:
-            await interaction.followup.send(
-                f"Honor-Guard event finalization failed: {exc}",
-                ephemeral=True,
-            )
-            return
-
-        if isinstance(interaction.message, discord.Message):
-            await self._deleteEventClockinMessage(session, message=interaction.message)
-        else:
-            await self._deleteEventClockinMessage(session)
-
-        extraNotes: list[str] = []
-        unresolvedUsers = list(result.get("unresolvedUsers") or [])
-        if unresolvedUsers:
-            extraNotes.append(
-                "Unresolved sheet users: " + ", ".join(f"<@{int(userId)}>" for userId in unresolvedUsers[:8])
-            )
-        archiveError = str(result.get("archiveError") or "").strip()
-        if archiveError:
-            extraNotes.append(f"Archive/schedule sync warning: {archiveError}")
-        summary = (
-            f"Honor-Guard event finalized.\n"
-            f"Type: `{result.get('eventType') or 'event'}`\n"
-            f"Attendees: `{int(result.get('attendeeCount') or 0)}`\n"
-            f"Attendance records: `{int(result.get('createdAttendanceRecords') or 0)}`\n"
-            f"Member sheet updates: `{int(result.get('updatedUsers') or 0)}`"
-        )
-        if extraNotes:
-            summary += "\n" + "\n".join(extraNotes)
-
-        try:
-            archiveResult = result.get("archiveResult") if isinstance(result.get("archiveResult"), dict) else {}
-            sheetRefs: list[dict[str, str]] = []
-            if int(result.get("updatedUsers") or 0) > 0:
-                sheetRefs.append({"sheetKey": "honorGuard_members"})
-            if bool(archiveResult.get("archiveSynced")):
-                sheetRefs.append({"sheetKey": "honorGuard_archive"})
-            if archiveResult.get("scheduleRemoval") is not None:
-                sheetRefs.append({"sheetKey": "honorGuard_schedule"})
-            if archiveResult.get("eventHostUpdate") is not None:
-                sheetRefs.append({"sheetKey": "honorGuard_eventHosts"})
-            if sheetRefs:
-                detailParts = [
-                    f"Event: {str(result.get('eventTitle') or result.get('eventType') or 'Honor Guard event')}",
-                    f"Date: {str(result.get('eventDate') or 'unknown')}",
-                    f"Attendees: {int(result.get('attendeeCount') or 0)}",
-                    f"Attendance records: {int(result.get('createdAttendanceRecords') or 0)}",
-                    f"Member sheet updates: {int(result.get('updatedUsers') or 0)}",
-                ]
-                if archiveResult.get("scheduleRemoval") is not None:
-                    detailParts.append("Schedule: removed archived event row")
-                if archiveResult.get("eventHostUpdate") is not None:
-                    detailParts.append("Event host stats: updated")
-                if unresolvedUsers:
-                    detailParts.append(f"Unresolved users: {len(unresolvedUsers)}")
-                await orbatAuditRuntime.sendOrbatChangeLog(
-                    self.bot,
-                    title="Spreadsheet Change",
-                    change="Updated Honor-Guard spreadsheets from finalized event.",
-                    requestedBy=interaction.user.mention,
-                    authorizedBy=interaction.user.mention,
-                    requestMessageUrl=str(getattr(interaction.message, "jump_url", "") or ""),
-                    details=" | ".join(detailParts),
-                    sheetRefs=sheetRefs,
-                )
-        except Exception:
-            log.exception(
-                "Failed to post Honor-Guard spreadsheet audit log for finalized event session %s.",
-                sessionId,
-            )
-
-        await interaction.followup.send(summary, ephemeral=True)
-
     @app_commands.command(
         name="honor-guard-status",
-        description="Show the current Honor-Guard ORBAT integration wiring.",
+        description="Show the current Honor Guard ORBAT integration wiring.",
     )
     async def honorGuardStatus(self, interaction: discord.Interaction) -> None:
         member = await self._requireAdminOrManageGuild(interaction)
@@ -411,12 +289,11 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             f"Archive channel: {_displayChannel(status.config.archiveChannelId)}",
             f"Spreadsheet: {_displayText(status.config.spreadsheetId)}",
             f"Member sheet: {_displayText(status.config.memberSheetName)}",
-            f"Schedule sheet: {_displayText(status.config.scheduleSheetName)}",
             f"Archive sheet: {_displayText(status.config.archiveSheetName)}",
             f"Event hosts sheet: {_displayText(status.config.eventHostsSheetName)}",
         ]
         embed = discord.Embed(
-            title="Honor-Guard Integration",
+            title="Honor Guard Integration",
             description="Backend tables, point rules, and sheet adapter are wired. Review commands are still separate.",
             color=discord.Color.gold(),
         )
@@ -441,24 +318,21 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
     @app_commands.command(
         name="honorguard-award-points",
-        description="Award points to a member of the Honor-Guard.",
+        description="Award points to a member of the Honor Guard.",
     )
     @app_commands.describe(
         awarded_user="User you want to award",
-        quota_points="Quota Points you want to award",
-        event_points="Event Points you want to award",
+        awarded_points="Amount of points you want to award",
         reason="The reason for the award",
     )
     @app_commands.rename(awarded_user="awarded-user")
-    @app_commands.rename(quota_points="quota-points")
-    @app_commands.rename(event_points="event-points")
+    @app_commands.rename(awarded_points="awarded-points")
     async def honorGuardAwardPoints(
         self,
         interaction: discord.Interaction,
         awarded_user: discord.Member,
         reason: str,
-        event_points: float,
-        quota_points: float = 0.0,
+        awarded_points: float,
     ) -> None:
         if not await self._ensureHonorGuardCommandGuild(interaction):
             return
@@ -468,32 +342,32 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 "This command can only be used in a server channel.",
             )
             return
-        if not self._canAwardPoints(interaction.user):
+        
+        if not self._isInHonorGuard(interaction.user):
+            await self._safeReply(interaction, "Only members of the Honor Guard can use this command.")
+            return
+
+
+        if not self._canAwardPoints(interaction.user, awarded_user):
             await self._safeReply(
                 interaction,
-                "You do not have permission to award Honor-Guard points.",
+                "You do not have permission to award Honor Guard points.",
             )
             return
-        if float(event_points or 0) < 0 or float(quota_points or 0) < 0:
+        if float(awarded_points or 0) <= 0 :
             await self._safeReply(
                 interaction,
-                "Honor-Guard point awards cannot be negative.",
+                "Honor Guard point awards cannot be zero or negative.",
             )
             return
-        if float(event_points or 0) <= 0 and float(quota_points or 0) <= 0:
-            await self._safeReply(
-                interaction,
-                "Set at least one positive point value before submitting the award.",
-            )
-            return
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         submissionId = await honorGuardService.createPointAwardSubmission(
             guildId=int(interaction.guild.id),
             channelId=int(interaction.channel.id),
             submitterId=int(interaction.user.id),
             awardedUserId=int(awarded_user.id),
-            quotaPoints=float(quota_points or 0),
-            eventPoints=float(event_points or 0),
+            awardedPoints=float(awarded_points or 0),
             reason=str(reason or "").strip(),
             awardedUserDisplayName=self._memberDisplayName(awarded_user),
         )
@@ -529,22 +403,19 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
     @app_commands.command(
         name="honorguard-solo-sentry",
-        description="Submit a solo sentry log for Honor-Guard review.",
+        description="Submit a solo sentry log for Honor Guard review.",
     )
     @app_commands.describe(
         duty_date="Duty date in YYYY-MM-DD format.",
-        roblox_username="Your Roblox username as it appears on the HG ORBAT.",
         image="Primary sentry screenshot.",
         extra_image="Second sentry screenshot.",
     )
     @app_commands.rename(duty_date="duty-date")
-    @app_commands.rename(roblox_username="roblox-username")
     @app_commands.rename(extra_image="extra-image")
     async def honorGuardSoloSentry(
         self,
         interaction: discord.Interaction,
         duty_date: str,
-        roblox_username: str,
         image: discord.Attachment,
         extra_image: discord.Attachment,
     ) -> None:
@@ -554,6 +425,13 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             await self._safeReply(
                 interaction,
                 "This command can only be used in a server channel.",
+            )
+            return
+
+        if not self._isInHonorGuard(interaction.user):
+            await self._safeReply(
+                interaction,
+                "Only members of the Honor Guard can use this command.",
             )
             return
 
@@ -592,12 +470,11 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             return
 
         try:
-            submissionId = await honorGuardService.createSentrySubmission(
+            submissionId = await honorGuardService.createSoloSentrySubmission(
                 guildId=int(interaction.guild.id),
                 channelId=int(interaction.channel.id),
                 submitterId=int(interaction.user.id),
                 targetUserId=int(interaction.user.id),
-                targetRobloxUsername=str(roblox_username or "").strip(),
                 targetDisplayName=self._memberDisplayName(interaction.user),
                 dutyDate=normalizedDutyDate,
                 imageUrls=imageUrls,
@@ -609,7 +486,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             )
             return
 
-        submission = await honorGuardService.getSentrySubmission(submissionId)
+        submission = await honorGuardService.getSoloSentrySubmission(submissionId)
         if not submission:
             await interaction.followup.send(
                 "Failed to create solo sentry submission.",
@@ -617,8 +494,8 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             )
             return
 
-        embed = honorGuardRendering.buildSentrySubmissionEmbed(submission)
-        view = HonorGuardSentryReviewView(self, submissionId)
+        embed = honorGuardRendering.buildSoloSentrySubmissionEmbed(submission)
+        view = HonorGuardSoloSentryReviewView(self, submissionId)
         reviewMessage = await self._postHonorGuardForReview(
             guild=interaction.guild,
             fallbackChannel=interaction.channel,
@@ -642,34 +519,29 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
     @app_commands.command(
         name="honorguard-event-log",
-        description="Create a clock-in for an Honor-Guard event.",
+        description="Create a clock-in for an Honor Guard event.",
     )
-    @app_commands.describe(
-        event_type="Event type like gamenight, orientation, training, lecture, jge, nco_exam, tryout, or inspection.",
-        event_title="Displayed event title or detail.",
-        event_time_utc="Optional event date/time text for archive and schedule matching.",
-        cohosts="Optional comma-separated co-host mentions or Discord IDs.",
-        supervisors="Optional comma-separated supervisor mentions or Discord IDs.",
-        schedule_event_id="Optional schedule event ID for cleaner archive removal.",
-        notes="Optional event notes.",
-        max_attendees="Maximum number of attendees allowed to clock in.",
+    @app_commands.choices(
+        event_type=[
+            Choice(name="Training", value="drill"),
+            Choice(name="Orientation", value="orientation"),
+            Choice(name="Sentry", value="sentry"),
+            Choice(name="Inspection", value="inspection"),
+            Choice(name="Game Night", value="gamenight"),
+            Choice(name="Junior Guardsman Exam", value="jge"),
+            Choice(name="Non-Commissioned Officer Exam", value="ncoe"),
+        ]
     )
     @app_commands.rename(event_type="event-type")
-    @app_commands.rename(event_title="event-title")
-    @app_commands.rename(event_time_utc="event-time-utc")
-    @app_commands.rename(schedule_event_id="schedule-event-id")
-    @app_commands.rename(max_attendees="max-attendees")
+    @app_commands.rename(event_description="event-description")
     async def honorGuardEventLog(
         self,
         interaction: discord.Interaction,
-        event_type: str,
-        event_title: str,
-        event_time_utc: str = "",
-        cohosts: str = "",
-        supervisors: str = "",
-        schedule_event_id: str = "",
-        notes: str = "",
-        max_attendees: app_commands.Range[int, 1, 100] = 30,
+        event_type : Choice[str],
+        event_description: str,
+        host: Optional[discord.Member] = None,
+        supervisors: Optional[str] = None,
+        cohosts: Optional[str] = None,
     ) -> None:
         if not await self._ensureHonorGuardCommandGuild(interaction):
             return
@@ -679,76 +551,71 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 "This command can only be used in a server channel.",
             )
             return
-        if not self._canHostEventClockin(interaction.user):
+        if not self._canCreateClockIn(interaction.user, event_type.value):
             await self._safeReply(
                 interaction,
-                "You do not have permission to start Honor-Guard event clock-ins.",
+                "You do not have permission to create this Honor Guard clock-in.",
             )
             return
 
-        normalizedCohosts = [
-            userId
-            for userId in self._parseUserIdList(cohosts)
-            if userId != int(interaction.user.id)
-        ]
-        normalizedSupervisors = [
-            userId
-            for userId in self._parseUserIdList(supervisors)
-            if userId not in {int(interaction.user.id), *normalizedCohosts}
-        ]
-        normalizedEventTime = str(event_time_utc or "").strip() or date.today().isoformat()
+        if event_type.value == "jge" or event_type.value == "ncoe":
+            await self._safeReply(
+                interaction,
+                "Exams arent implement yet"
+            )
+            return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        sessionId = await self._eventClockinEngine.createSession(
+        if not host:
+            host = interaction.user
+        coHostIds = _parseUserIdList(str(cohosts or ""))
+        supervisorIds = _parseUserIdList(str(supervisors or ""))
+        eventId = await self._clockInEngine.createSession(
             guildId=int(interaction.guild.id),
             channelId=int(interaction.channel.id),
-            hostId=int(interaction.user.id),
-            maxAttendeeLimit=int(max_attendees or 30),
-            eventType=str(event_type or "").strip(),
-            eventTitle=str(event_title or "").strip(),
-            eventDate=normalizedEventTime,
-            coHostUserIds=normalizedCohosts,
-            supervisorUserIds=normalizedSupervisors,
-            scheduleEventId=str(schedule_event_id or "").strip(),
-            notes=str(notes or "").strip(),
-            createdBy=int(interaction.user.id),
+            hostId=int(host.id),
+            maxAttendeeLimit=99,
+            eventType=event_type.value,
+            eventTitle=str(event_description or "").strip(),
+            eventDate=datetime.now().isoformat(timespec="minutes"),
         )
-        session = await self._eventClockinEngine.getSession(int(sessionId))
-        if not session:
-            await interaction.followup.send(
-                "Could not create Honor-Guard event clock-in.",
-                ephemeral=True,
+        hostMemberGroup = _getMemberGroup(host)
+        await self._clockInEngine.addAttendee(eventId, int(host.id), memberGroup=hostMemberGroup, participantRole="HOST", guildId=int(interaction.guild.id))
+        guild = self.bot.get_guild(int(interaction.guild.id)) 
+        for supervisorId in supervisorIds:
+            user = guild.get_member(supervisorId)
+            memberGroup = _getMemberGroup(user)
+            await self._clockInEngine.addAttendee(eventId, supervisorId, memberGroup=memberGroup, participantRole="SUPERVISOR", guildId=int(interaction.guild.id))
+        for coHostId in coHostIds:
+            user = guild.get_member(coHostId)
+            memberGroup = _getMemberGroup(user)
+            await self._clockInEngine.addAttendee(eventId, coHostId, memberGroup=memberGroup, participantRole="COHOST", guildId=int(interaction.guild.id))
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(
+                interaction,
+                "Could not create event clock-in.",
             )
             return
-
-        embed = self._eventClockinAdapter.buildEmbed(session, [])
-        view = HonorGuardEventClockinView(self, int(sessionId))
-        message = await interactionRuntime.safeChannelSend(
-            interaction.channel,
-            embed=embed,
-            view=view,
-        )
+        embed = self._clockInAdapter.buildEmbed(event, await self._clockInEngine.listAttendees(eventId))
+        view = HonorGuardEventView(self, eventId)
+        message = await interactionRuntime.safeChannelSend(interaction.channel, embed=embed, view=view)
         if message is None:
-            await interaction.followup.send(
-                "Could not create the Honor-Guard clock-in message in this channel.",
-                ephemeral=True,
+            await self._safeReply(
+                interaction,
+                "Could not create the event clock-in message in this channel.",
             )
             return
-        await self._eventClockinEngine.setSessionMessageId(int(sessionId), int(message.id))
-        await interaction.followup.send(
-            "Honor-Guard event clock-in created.",
-            ephemeral=True,
+        await self._clockInEngine.setSessionMessageId(int(eventId), int(message.id))
+        await self._safeReply(
+            interaction,
+            "Group event clock-in created.",
         )
+
 
     @app_commands.command(
         name="honorguard-schedule-event",
-        description="Schedule an event for Honor-Guard.",
+        description="Schedule an event for Honor Guard.",
     )
-    @app_commands.describe(
-        member="Member associated with the scheduled Honor-Guard event.",
-        event_description="Short description of the event to schedule.",
-    )
-    @app_commands.rename(event_description="event-description")
     async def honorGuardScheduleEvent(
         self,
         interaction: discord.Interaction,
@@ -759,12 +626,12 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         _ = event_description
         await self._safeReply(
             interaction,
-            "Honor-Guard event scheduling is not wired yet.",
+            "Honor Guard event scheduling is not wired yet.",
         )
 
     @app_commands.command(
         name="honorguard-quota-cycle",
-        description="Cycle the quota for Honor-Guard.",
+        description="Cycle the quota for Honor Guard.",
     )
     async def honorGuardQuotaCycle(
         self,
@@ -774,8 +641,420 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         _ = member
         await self._safeReply(
             interaction,
-            "Honor-Guard quota cycling is not wired yet.",
+            "Honor Guard quota cycling is not wired yet.",
         )
+
+    async def _canManageEvent(self, interaction: discord.Interaction, event: dict) -> bool:
+        if interaction.user.id == int(event.get("hostId") or 0):
+            return True
+        else:
+            attendees = await self._clockInEngine.listAttendees(int(event.get("eventId") or 0))
+            for attendee in attendees:
+                if attendee.get("participantRole") == "SUPERVISOR" and int(attendee.get("userId") or 0) == interaction.user.id:
+                    return True
+        return False
+
+    async def _updateEventMessage(
+        self,
+        eventId: int,
+        *,
+        message: Optional[discord.Message] = None,
+    ) -> None:
+        await self._clockInEngine.updateClockinMessage(
+            int(eventId),
+            viewFactory=lambda sessionId: HonorGuardEventView(self, sessionId),
+            message=message,
+        )
+
+    async def _refreshEventMessageFromInteraction(
+        self,
+        eventId: int,
+        interaction: discord.Interaction,
+    ) -> None:
+        if isinstance(interaction.message, discord.Message):
+            await self._updateEventMessage(eventId, message=interaction.message)
+            return
+        await self._updateEventMessage(eventId)
+
+    async def _deleteEventClockinMessage(
+        self,
+        event: dict,
+        *,
+        message: Optional[discord.Message] = None,
+    ) -> None:
+        await self._clockInEngine.deleteClockinMessage(
+            event,
+            message=message,
+        )
+
+    async def _collectTwoImageEvidenceMessage(
+        self,
+        *,
+        channel: discord.abc.Messageable,
+        userId: int,
+        timeoutSec: float = 180.0,
+    ) -> Optional[discord.Message]:
+        channelId = getattr(channel, "id", None)
+        if channelId is None:
+            return None
+
+        def check(message: discord.Message) -> bool:
+            # We only accept the submitter's next message in this channel with
+            # exactly two image attachments.
+            if message.author.id != userId:
+                return False
+            if message.channel.id != channelId:
+                return False
+            images = [att for att in message.attachments if _isImageAttachment(att)]
+            return len(images) == 2
+
+        try:
+            message = await self.bot.wait_for("message", check=check, timeout=timeoutSec)
+        except asyncio.TimeoutError:
+            return None
+        return message
+
+    async def _resolveConfiguredMessageChannel(
+        self,
+        guild: discord.Guild,
+        channelId: int,
+    ) -> Optional[discord.abc.Messageable]:
+        if int(channelId or 0) <= 0:
+            return None
+        channel = self.bot.get_channel(int(channelId))
+        if channel is None:
+            channel = guild.get_channel(int(channelId))
+        if channel is None:
+            channel = await interactionRuntime.safeFetchChannel(self.bot, int(channelId))
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return channel
+        return None
+
+    async def handleEventJoin(self, interaction: discord.Interaction, eventId: int) -> None:
+        if interaction.user.bot:
+            await self._safeReply(interaction, "Bots cannot join patrols.")
+            return
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await self._safeReply(interaction, "This event is no longer open.")
+            return
+        if interaction.user.id == int(event.get("hostId") or 0):
+            #pass
+            await self._safeReply(interaction, "You are the host of this event and cannot clock in as an attendee.")
+            return
+            
+        if not self._isInHonorGuard(interaction.user):
+            await self._safeReply(interaction, "Only members of the Honor Guard can join this event.")
+            return
+        
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        if any(attendee.get("userId") == interaction.user.id and attendee.get("participantRole") != "HOST" for attendee in attendees):
+            await self._safeReply(interaction, "You are already clocked in to this event.")
+            return
+            
+        memberGroup = _getMemberGroup(interaction.user)
+        
+        await self._clockInEngine.addAttendee(int(eventId), int(interaction.user.id), memberGroup=memberGroup, guildId=int(interaction.guild.id))
+        await self._safeReply(interaction, "You have been added to this event.")
+        await self._refreshEventMessageFromInteraction(eventId, interaction)
+
+    async def handleEventDelete(self, interaction: discord.Interaction, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if not await self._canManageEvent(interaction, event):
+            await self._safeReply(interaction, "Only the event host and supervisors can delete this event.")
+            return
+        await self._clockInEngine.updateSessionStatus(int(eventId), "CANCELED")
+        await self._safeReply(interaction, "Event deleted.")
+        await self._refreshEventMessageFromInteraction(eventId, interaction)
+
+    async def openEventManage(self, interaction: discord.Interaction, eventId: int) -> None:
+        lock = self._eventLocks.setdefault(eventId, asyncio.Lock())
+        async with lock:
+            event = await self._clockInEngine.getSession(int(eventId))
+            if not event:
+                await self._safeReply(interaction, "This event session no longer exists.")
+                return
+            if not await self._canManageEvent(interaction, event):
+                await self._safeReply(interaction, "Only the event host and supervisors can manage attendees.")
+                return
+            if str(event.get("status") or "").upper() != "OPEN":
+                await self._safeReply(interaction, "This event is not open.")
+                return
+            submitRecord = _checkRecordByEventId(eventId, "SUBMIT")
+            if submitRecord != None:
+                await self._safeReply(interaction, f"This event is currently being submitted by {submitRecord.get('user').display_name} and cannot be managed until submission is closed.")
+                return
+            record = _checkRecordByEventId(eventId, "MANAGE")
+            if record != None:
+                await self._safeReply(interaction, f"This event is already being managed by {record.get('user').display_name}.")
+                return
+            attendees = await self._clockInEngine.listAttendees(int(eventId))
+            if not attendees or len(attendees) == 1: # only Host Record
+                await self._safeReply(interaction, "No attendees to manage.")
+                return
+            _saveRecord(interaction, interaction.user, int(eventId), "MANAGE")
+            enbed = self._clockInAdapter.buildEventManageEmbed(event, attendees)
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                embed=enbed,
+                view=HonorGuardEventManageView(self, eventId, interaction.guild.id, interaction.user.id, attendees),
+                ephemeral=True,
+            )
+
+    async def handleAssignAttendee(self, interaction: discord.Interaction, eventId: int, selectedAttendee: dict) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if not await self._canManageEvent(interaction, event):
+            await self._safeReply(interaction, "Only the event host and supervisors can edit co-hosts.")
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await self._safeReply(interaction, "This event is not open.")
+            return
+
+        await self._clockInEngine.removeAttendee(int(eventId), selectedAttendee.get("userId"))
+        await self._clockInEngine.addAttendee(int(eventId), int(selectedAttendee.get("userId")), participantRole="ATTENDEE", memberGroup=selectedAttendee.get("memberGroup"), guildId=int(interaction.guild.id))
+
+    async def handleAssignCohost(self, interaction: discord.Interaction, eventId: int, selectedAttendee: dict) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if not await self._canManageEvent(interaction, event):
+            await self._safeReply(interaction, "Only the event host and supervisors can edit co-hosts.")
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await self._safeReply(interaction, "This event is not open.")
+            return
+
+        await self._clockInEngine.removeAttendee(int(eventId), selectedAttendee.get("userId"))
+        await self._clockInEngine.addAttendee(int(eventId), int(selectedAttendee.get("userId")), participantRole="COHOST", memberGroup=selectedAttendee.get("memberGroup"), guildId=int(interaction.guild.id))
+
+    async def handleAssignSupervisor(self, interaction: discord.Interaction, eventId: int, selectedAttendee: dict) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if not await self._canManageEvent(interaction, event):
+            await self._safeReply(interaction, "Only the event host and supervisors can edit co-hosts.")
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await self._safeReply(interaction, "This event is not open.")
+            return
+
+        await self._clockInEngine.removeAttendee(int(eventId), selectedAttendee.get("userId"))
+        await self._clockInEngine.addAttendee(int(eventId), int(selectedAttendee.get("userId")), memberGroup=selectedAttendee.get("memberGroup"), participantRole="SUPERVISOR", guildId=int(interaction.guild.id))
+
+    async def handleRemoveAttendee(self, interaction: discord.Interaction, eventId: int, selectedAttendee: dict) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if not await self._canManageEvent(interaction, event):
+            await self._safeReply(interaction, "Only the event host and supervisors can remove attendees.")
+            return
+        if str(event.get("status") or "").upper() != "OPEN":
+            await self._safeReply(interaction, "This event is not open.")
+            return
+
+        await self._clockInEngine.removeAttendee(int(eventId), selectedAttendee.get("userId"))
+
+    async def closeEventManage(self, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            return
+        record = _getRecordByEventId(eventId)
+        if record:
+            try:
+                await record.get("interaction").delete_original_response()
+                await self._updateEventMessage(eventId)
+            except:
+                pass
+        _deleteRecord(eventId, "MANAGE")
+
+    async def handleEditPoints(self, interaction: discord.Interaction, eventId: int, attendee: dict, new_points: float, type: str) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if str(event.get("status") or "").upper() != "FINISHED":
+            await self._safeReply(interaction, "This event is not finished.")
+            return
+
+        if type == "QUOTA":
+            points = honorGuardService.HonorGuardPointDeltas(quotaPoints=new_points, promotionEventPoints=attendee.get("eventPoints", 0))
+        else:
+            points = honorGuardService.HonorGuardPointDeltas(quotaPoints=attendee.get("quotaPoints", 0), promotionEventPoints=new_points)
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        await honorGuardService.updateAttendeePoints(recordId=int(attendee.get("recordId") or 0), points=points)
+
+    async def openSubmitEvent(self, interaction: discord.Interaction, eventId: int, durationMinutes: int) -> None:
+        lock = self._eventLocks.setdefault(eventId, asyncio.Lock())
+        async with lock:
+            event = await self._clockInEngine.getSession(int(eventId))
+            if not event:
+                await self._safeReply(interaction, "This event session no longer exists.")
+                return
+            if not await self._canManageEvent(interaction, event):
+                await self._safeReply(interaction, "Only the event host and supervisors can submit this event.")
+                return
+            if str(event.get("status") or "").upper() != "OPEN":
+                await self._safeReply(interaction, "This event is not open.")
+                return
+            manageRecord = _checkRecordByEventId(eventId, "MANAGE")
+            if manageRecord != None:
+                await self._safeReply(interaction, f"This event is currently being managed by {manageRecord.get('user').display_name} and cannot be submitted until management is closed.")
+                return
+            record = _checkRecordByEventId(eventId, "SUBMIT")
+            if record != None:
+                await self._safeReply(interaction, f"This event is already being submitted by {record.get('user').display_name}.")
+                return
+            attendees = await self._clockInEngine.listAttendees(int(eventId))
+            if not attendees or len(attendees) == 1: # only Host Record
+                await self._safeReply(interaction, "No attendees found for this event.")
+                return
+            
+            await honorGuardService.setEventRecordDuration(int(eventId), durationMinutes)
+
+            for attendee in attendees:
+                points = honorGuardService.calculatePointDeltas(configModule=config, memberGroup=attendee.get("memberGroup"), eventType=event.get("eventType"), participantRole=attendee.get("participantRole"), attendeeCount=len(attendees), durationMinutes=durationMinutes)
+                await honorGuardService.updateAttendeePoints(recordId=int(attendee.get("recordId")), points=points)
+
+            attendees = await self._clockInEngine.listAttendees(int(eventId))
+
+            _saveRecord(interaction, interaction.user.id, int(eventId), "SUBMIT")
+            enbed = self._clockInAdapter.buildSubmitEmbed(event, attendees)
+            view = HonorGuardEventSubmitView(self, interaction.user.id, eventId, interaction.guild.id, attendees)
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                embed=enbed,
+                view=view,
+                ephemeral=True,
+            )
+            await self._clockInEngine.updateSessionStatus(int(eventId), "FINISHED")
+
+    async def closeEventSubmit(self, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            return
+        record = _getRecordByEventId(eventId)
+        if record:
+            try:
+                await record.get("interaction").delete_original_response()
+                await self._clockInEngine.updateSessionStatus(int(eventId), "OPEN")
+                _deleteRecord(eventId, "SUBMIT")
+            except:
+                pass
+
+    async def handleEventSubmit(
+        self,
+        interaction: discord.Interaction,
+        eventId: int,
+    ) -> None:
+        lock = self._eventLocks.setdefault(eventId, asyncio.Lock())
+        async with lock:
+            # Guard against double-finalize clicks while one reviewer is still
+            # uploading evidence / posting the review message.
+            event = await self._clockInEngine.getSession(int(eventId))
+            if not event:
+                await self._safeReply(interaction, "This event session no longer exists.")
+                return
+            if not await self._canManageEvent(interaction, event):
+                await self._safeReply(interaction, "Only the event host and supervisors can submit this event.")
+                return
+            if str(event.get("status") or "").upper() != "FINISHED":
+                await self._safeReply(interaction, "This event is not finished.")
+                return
+
+            # await self._safeReply(interaction, "Not wired yet")
+            # return
+
+            allAttendees = await self._clockInEngine.listAttendees(int(eventId))
+
+            evidenceChannelId = int(
+                getattr(
+                    config,
+                    "honorGuardEventEvidenceChannelId",
+                    getattr(config, "honorGuardChannelId", 0),
+                )
+                or 0
+            )
+            evidenceChannel = await self._resolveConfiguredMessageChannel(
+                interaction.guild,
+                evidenceChannelId,
+            )
+            if evidenceChannel is None:
+                evidenceChannel = interaction.channel
+
+            await self._safeReply(interaction, f"Upload two event screenshots in <#{evidenceChannel.id}> within 3 minutes.")
+            
+            # We reuse the evidence collector so solo/group flows behave the same.
+            evidenceMessage = await self._collectTwoImageEvidenceMessage(
+                channel=evidenceChannel,
+                userId=interaction.user.id,
+            )
+            if evidenceMessage is None:
+                await interaction.followup.send(
+                    "Timed out waiting for two image screenshots. Event is still open.",
+                    ephemeral=True,
+                )
+                return
+            imageUrls = _evidenceLinks(evidenceMessage.attachments)
+            #await evidenceMessage.delete()
+            submissionId = await honorGuardService.createEventSubmission(
+                eventId=int(eventId),
+                event=event,
+                submitterId=int(interaction.user.id),
+                imageUrls=imageUrls,
+                evidenceMessageUrl=evidenceMessage.jump_url
+            )
+            submission = await honorGuardService.getEventSubmission(submissionId)
+            if not submission:
+                await interaction.followup.send(
+                    "Failed to create event submission.",
+                    ephemeral=True,
+                )
+                return
+
+            embed = honorGuardRendering.buildEventReviewEmbed(submission, event, allAttendees)
+            reviewView = HonorGuardEventReviewView(self, submissionId)
+            reviewMessage = await self._postHonorGuardForReview(
+                guild=interaction.guild,
+                fallbackChannel=interaction.channel,
+                embed=embed,
+                view=reviewView,
+                reviewChannelId=int(getattr(config, "honorGuardReviewChannelId", 0) or 0),
+            )
+            if not reviewMessage:
+                await interaction.followup.send(
+                    "Could not post this submission for review.",
+                    ephemeral=True,
+                )
+                return
+
+            await honorGuardService.setSubmissionMessageId(
+                submissionId,
+                reviewMessage.id,
+            )
+            await self._clockInEngine.updateSessionStatus(int(eventId), "SUBMITTED")
+
+            await self._deleteEventClockinMessage(event)
+
+            await interaction.followup.send(
+                "Event submitted for review.",
+                ephemeral=True,
+            )
+            record = _getRecordByEventId(eventId)
+            if record:
+                await record.get("interaction").delete_original_response()
+            _deleteRecord(eventId, "SUBMIT")
 
     async def _postHonorGuardForReview(
         self,

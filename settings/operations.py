@@ -358,7 +358,6 @@ multiOrbatSheets = [
                 "promotionEvent": honorGuardPromotionEventPointsColumn,
                 "promotionAwarded": honorGuardPromotionAwardedPointsColumn,
                 "promotionTotal": honorGuardPromotionTotalPointsColumn,
-                "hostedEvents": honorGuardHostedEventsColumn,
             },
             "profileColumns": {
                 "rank": honorGuardRankColumn,
@@ -369,18 +368,6 @@ multiOrbatSheets = [
         "organization": {
             "enabled": honorGuardEnabled,
             "supportsSectionHeaders": True,
-        },
-    },
-    {
-        "key": "honorGuard_schedule",
-        "displayName": "Honor Guard Event Schedule",
-        "spreadsheetId": honorGuardSpreadsheetId,
-        "sheetName": honorGuardScheduleSheetName,
-        "credentialsPathEnvVar": honorGuardCredentialsPathEnvVar,
-        "credentialsPathConfigKey": honorGuardCredentialsPathConfigKey,
-        "organization": {
-            "enabled": honorGuardEnabled,
-            "supportsSectionHeaders": False,
         },
     },
     {

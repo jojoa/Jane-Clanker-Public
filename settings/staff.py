@@ -171,7 +171,6 @@ honorGuardSpreadsheetId = _envText(
     "1aLD68JNA2nRjTxG1c3DZOtb_DPRXE4uNKN7ZxpKo_0k",
 )
 honorGuardMemberSheetName = "Main"
-honorGuardScheduleSheetName = "Event Scheduling"
 honorGuardArchiveSheetName = "Event Archive"
 honorGuardEventHostsSheetName = "Event Hosts"
 honorGuardCredentialsPathEnvVar = "ORBAT_GOOGLE_CREDENTIALS_PATH"
@@ -186,23 +185,13 @@ honorGuardQuotaPointsColumn = "E"
 honorGuardPromotionEventPointsColumn = "K"
 honorGuardPromotionAwardedPointsColumn = "L"
 honorGuardPromotionTotalPointsColumn = ""
-honorGuardHostedEventsColumn = ""
-honorGuardJuniorExamPassedColumn = "N"
-honorGuardNcoExamPassedColumn = "O"
+honorGuardJuniorExamPassedColumn = "O"
+honorGuardNcoExamPassedColumn = "P"
 honorGuardQuotaCompleteFormulaColumn = "G"
-honorGuardPromotionEligibleFormulaColumn = "P"
-honorGuardStrikesColumn = "Q"
+honorGuardPromotionEligibleFormulaColumn = "Q"
+honorGuardStrikesColumn = "R"
 
 # Honor Guard schedule/archive sheet columns.
-honorGuardScheduleEventIdColumn = ""
-honorGuardScheduleEventTypeColumn = "A"
-honorGuardScheduleEventTimeColumn = "B"
-honorGuardScheduleHostColumn = "C"
-honorGuardScheduleCoHostsColumn = "D"
-honorGuardScheduleSupervisorsColumn = "E"
-honorGuardScheduleEventDetailColumn = "F"
-honorGuardScheduleNotesColumn = "G"
-honorGuardScheduleStatusColumn = ""
 honorGuardArchiveColumns = [
     "eventType",
     "eventTimeUtc",
@@ -222,7 +211,7 @@ honorGuardEventHostInspectionsColumn = "J"
 honorGuardEventHostEventTypeColumns = {
     "jge": honorGuardEventHostExamsColumn,
     "junior guardsman exam": honorGuardEventHostExamsColumn,
-    "nco_exam": honorGuardEventHostExamsColumn,
+    "ncoe": honorGuardEventHostExamsColumn,
     "nco exam": honorGuardEventHostExamsColumn,
     "orientation": honorGuardEventHostTrainingsColumn,
     "training": honorGuardEventHostTrainingsColumn,
@@ -235,22 +224,10 @@ honorGuardEventHostEventTypeColumns = {
 }
 
 # Honor Guard ranks and point rules.
-honorGuardEnlistedRanks = [
-    "Jr Guardsman",
-    "Junior Guardsman",
-    "Guardsman",
-]
-honorGuardNcoRanks = [
-    "Sr Guardsman",
-    "Senior Guardsman",
-    "Patrol Sergeant",
-]
-honorGuardOfficerRanks = [
-    "Parade Officer",
-    "Senior Parade Officer",
-    "Honor Guard Officer",
-    "Commanding Officer",
-]
+honorGuardEnlistedRoleIds = []
+honorGuardNcoRoleIds = []
+honorGuardOfficerRoleIds = []
+
 honorGuardExcuseStatusValues = [
     "Excused",
     "LoA",
@@ -261,29 +238,52 @@ honorGuardExcuseStatusValues = [
 ]
 honorGuardBiweeklyQuotaPointsRequired = 4
 honorGuardEarlyActiveQuotaPoints = 8
-honorGuardSentryDutyMinutesRequired = 30
-honorGuardSentryDutyQuotaPoints = 1
-honorGuardSentryDutyPromotionPoints = 1
+honorGuardSoloSentryDutyMinutesRequired = 30
+honorGuardSoloSentryDutyPromotionPoints = 1
 honorGuardAttendanceQuotaPointsByEventType = {
     "gamenight": 0.5,
 }
 honorGuardAttendancePromotionPointsByEventType = {
-    "inspection": 8,
-    "sentry": 1,
+    "drill" : {
+        "base": 2,
+        "per_intervall": 0,
+        "minimum": 0
+    },
+    "inspection": {
+        "base": 8,
+        "per_intervall": 0,
+        "minimum": 0
+    },
+    "sentry": {
+        "base": 0,
+        "per_intervall": 1,
+        "minimum": 0
+    },
+    "orientation": {
+        "base": 0,
+        "per_intervall": 1,
+        "minimum": 2
+    },
 }
-honorGuardOfficerHostPromotionPointsByEventType = {
+honorGuardHostPromotionPointsByEventType = {
     "gamenight": 1,
     "orientation": 2,
-    "training": 3,
+    "drill": 3,
     "lecture": 3,
     "tryout": 6,
     "inspection": 8,
 }
-honorGuardOfficerSupervisorPromotionPointsByEventType = {
-    "orientation": 2,
-}
-honorGuardOfficerCohostPromotionPointsByEventType = {
-    "inspection": 8,
+honorGuardSupervisorPromotionPointsByEventType = {
+    "orientation": {
+        "base": 0,
+        "per_intervall": 1,
+        "minimum": 2
+    },
+    "drill" : {
+        "base": 2,
+        "per_intervall": 0,
+        "minimum": 0
+    },
 }
 honorGuardJgePointsPerGradedAttendee = 0.75
 honorGuardNcoExamPointsPerGradedAttendee = 1.5

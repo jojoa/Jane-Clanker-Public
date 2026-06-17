@@ -5,15 +5,15 @@ from typing import Any, Mapping
 import discord
 
 
-def statusIcon(status: str) -> str:
+def statusIcon(status: str, approver: str) -> str:
     normalized = str(status or "").strip().upper()
     if normalized == "APPROVED":
-        return ":white_check_mark: Approved"
+        return f":white_check_mark: Approved by {approver}"
     if normalized == "REJECTED":
-        return ":x: Rejected"
+        return f":x: Rejected by {approver}"
     if normalized == "NEEDS_INFO":
-        return ":warning: Needs clarification"
-    return ":o: Pending"
+        return f":warning: Needs clarification by {approver}"
+    return f":o: Pending"
 
 
 def _mentionUser(userId: object) -> str:
@@ -42,54 +42,43 @@ def _clip(text: str, limit: int = 1024) -> str:
 
 
 def buildPointAwardEmbed(submission: Mapping[str, Any]) -> discord.Embed:
-    awardedUserId = (
-        submission.get("awardedUserId")
-        or submission.get("targetUserId")
-        or submission.get("recruitUserId")
-        or 0
-    )
+    awardedUserId = submission.get("targetUserId") or 0
     reason = str(submission.get("reason") or "").strip() or "_No reason provided._"
     embed = discord.Embed(
-        title="Honor-Guard Point Award",
+        title="Honor Guard Point Award",
         color=discord.Color.gold(),
     )
     embed.add_field(name="Awarder", value=_mentionUser(submission.get("submitterId")), inline=False)
     embed.add_field(name="Awarded User", value=_mentionUser(awardedUserId), inline=False)
-    embed.add_field(name="Quota Points", value=_formatPoints(submission.get("quotaPoints")), inline=True)
     embed.add_field(
-        name="Event Points",
-        value=_formatPoints(submission.get("eventPoints") or submission.get("awardedPoints")),
+        name="Awarded Promotion Points",
+        value=_formatPoints(submission.get("promotionAwardedPoints")),
         inline=True,
     )
     embed.add_field(name="Reason", value=reason, inline=False)
     embed.add_field(name="Status", value=statusIcon(str(submission.get("status") or "")), inline=False)
     return embed
 
-
-def buildSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Embed:
+def buildSoloSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Embed:
     targetUserId = submission.get("targetUserId") or 0
     dutyDate = str(submission.get("eventDate") or "").strip() or "Unknown"
     minutes = int(submission.get("minutes") or 0)
     imageUrls = submission.get("imageUrls") or []
-    evidenceMessageUrl = str(submission.get("evidenceMessageUrl") or "").strip()
 
     embed = discord.Embed(
-        title="Honor-Guard Solo Sentry",
+        title="Honor Guard Solo Sentry",
         color=discord.Color.orange(),
     )
     embed.add_field(name="Submitter", value=_mentionUser(submission.get("submitterId")), inline=False)
     embed.add_field(name="Member", value=_mentionUser(targetUserId), inline=False)
     embed.add_field(name="Duty Date", value=f"`{dutyDate}`", inline=True)
     embed.add_field(name="Minutes", value=f"`{minutes}`", inline=True)
-    embed.add_field(name="Quota Points", value=_formatPoints(submission.get("quotaPoints")), inline=True)
     embed.add_field(
         name="Promotion Event Points",
         value=_formatPoints(submission.get("promotionEventPoints")),
         inline=True,
     )
-    if evidenceMessageUrl:
-        embed.add_field(name="Evidence Message", value=f"[Open message]({evidenceMessageUrl})", inline=False)
-    elif isinstance(imageUrls, list) and imageUrls:
+    if isinstance(imageUrls, list) and imageUrls:
         preview = "\n".join(
             f"[Screenshot {index + 1}]({str(url).strip()})"
             for index, url in enumerate(imageUrls[:6])
@@ -100,49 +89,67 @@ def buildSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Embed:
     embed.add_field(name="Status", value=statusIcon(str(submission.get("status") or "")), inline=False)
     return embed
 
+def buildEventReviewEmbed(submission: dict, event: dict, allAttendees: list[dict]) -> discord.Embed:
+    eventId = event.get("eventId")
+    eventTitle = str(event.get("eventTitle") or "").strip() or f"Event {eventId}"
+    eventType = str(event.get("eventType") or "").strip() or "Unknown"
+    eventDate = str(event.get("eventDate") or "").strip() or "Unknown"
+    imageUrls = submission.get("imageUrls") or []
+    embed = discord.Embed(
+        title=f"Review for {eventType}",
+        description=f"**Event Title:** `{eventTitle}`",
+        color=discord.Color.blue(),
+    )
+    attendees = filter(lambda x: str(x.get("participantRole")).upper() == "ATTENDEE", allAttendees)
+    supervisors = filter(lambda x: str(x.get("participantRole")).upper() == "SUPERVISOR", allAttendees)
+    cohosts = filter(lambda x: str(x.get("participantRole")).upper() == "COHOST", allAttendees)
 
-def _mentionList(userIds: object) -> str:
-    values: list[str] = []
-    for raw in list(userIds or []):
-        try:
-            userId = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if userId <= 0:
-            continue
-        values.append(f"<@{userId}>")
-    return ", ".join(values) if values else "_None_"
-
-
-def buildEventClockinEmbed(session: Mapping[str, Any], attendees: list[dict[str, Any]]) -> discord.Embed:
-    attendeeLines = [
-        f"{index}. <@{int(row.get('userId') or 0)}>"
-        for index, row in enumerate(attendees, start=1)
+    attendeeMentions = [
+        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+        for index, row in enumerate(attendees)
         if int(row.get("userId") or 0) > 0
     ]
-    attendeeValue = "\n".join(attendeeLines) if attendeeLines else "No attendees yet."
-    maxAttendeeLimit = int(session.get("maxAttendeeLimit") or 30)
-    eventDate = str(session.get("eventDate") or "").strip() or "Not set"
-    eventTitle = str(session.get("eventTitle") or "").strip() or "Honor-Guard Event"
-    notes = str(session.get("notes") or "").strip()
-    status = str(session.get("status") or "OPEN").strip().upper() or "OPEN"
+    supervisorMentions = [
+        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+        for index, row in enumerate(supervisors)
+        if int(row.get("userId") or 0) > 0
+    ]
+    cohostMentions = [
+        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+        for index, row in enumerate(cohosts)
+        if int(row.get("userId") or 0) > 0
+    ]
 
-    embed = discord.Embed(
-        title="Honor-Guard Event Clock-in",
-        description=eventTitle,
-        color=discord.Color.blurple(),
-    )
-    embed.add_field(name="Event Type", value=f"`{str(session.get('eventType') or 'event')}`", inline=True)
-    embed.add_field(name="Event Time", value=f"`{eventDate}`", inline=True)
-    embed.add_field(name="Host", value=_mentionUser(session.get("hostId")), inline=False)
-    embed.add_field(name="Co-hosts", value=_mentionList(session.get("coHostUserIds") or []), inline=False)
-    embed.add_field(name="Supervisors", value=_mentionList(session.get("supervisorUserIds") or []), inline=False)
+    host = next((row for row in allAttendees if int(row.get("userId") or 0) == event.get("hostId")), None)
+    hostMention = f"<@{int(host.get('userId') or 0)}> - {host.get("quotaPoints")}E{host.get("promotionEventPoints")} points"
+
+    embed.add_field(name="Duration", value=f"`{event.get("durationMinutes") or 0} minutes`", inline=True)
+    embed.add_field(name="Date", value=f"`{eventDate}`", inline=True)
+    embed.add_field(name="Submitter", value=_mentionUser(submission.get("submitterId")), inline=False)
+    embed.add_field(name="Host", value=hostMention, inline=False)
     embed.add_field(
-        name=f"Attendees ({len(attendeeLines)}/{maxAttendeeLimit})",
-        value=_clip(attendeeValue),
+        name=f"Supervisors ({len(supervisorMentions)}):\n",
+        value="\n".join(supervisorMentions) if supervisorMentions else "No supervisors assigned.",
+        inline=False)
+    embed.add_field(
+        name=f"Cohosts ({len(cohostMentions)}):\n",
+        value="\n".join(cohostMentions) if cohostMentions else "No cohosts assigned.",
+        inline=False)
+    embed.add_field(
+        name=f"Attendees ({len(attendeeMentions)}):\n",
+        value="\n".join(attendeeMentions) if attendeeMentions else "No attendees yet.",
         inline=False,
     )
-    if notes:
-        embed.add_field(name="Notes", value=_clip(notes), inline=False)
-    embed.add_field(name="Status", value=f"`{status}`", inline=False)
+    if isinstance(imageUrls, list) and imageUrls:
+        preview = "\n".join(
+            f"[Screenshot {index + 1}]({str(url).strip()})"
+            for index, url in enumerate(imageUrls[:6])
+            if str(url).strip()
+        )
+        if preview:
+            embed.add_field(name="Evidence", value=_clip(preview), inline=False)
+    reviewerMention = "N/A"
+    if submission.get("status") != "PENDING":
+        reviewerMention = _mentionUser(submission.get("reviewerId"))
+    embed.add_field(name="Status", value=statusIcon(str(submission.get("status") or ""), reviewerMention), inline=False)
     return embed
