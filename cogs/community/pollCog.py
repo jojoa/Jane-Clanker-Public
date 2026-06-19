@@ -134,19 +134,6 @@ class PollCog(commands.Cog):
             if messageId <= 0:
                 continue
             self.bot.add_view(self._buildPollView(pollRow), message_id=messageId)
-            channel = await self._getMessageChannel(int(pollRow.get("channelId") or 0))
-            if channel is not None:
-                try:
-                    message = await channel.fetch_message(messageId)
-                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                    message = None
-                if message is not None:
-                    voteRows = await listPollVotes(int(pollRow.get("pollId") or 0))
-                    await interactionRuntime.safeMessageEdit(
-                        message,
-                        embed=buildPollEmbed(pollRow, voteRows),
-                        view=self._buildPollView(pollRow),
-                    )
             restored += 1
         return restored
 
@@ -192,6 +179,8 @@ class PollCog(commands.Cog):
         )
 
     async def _runPollCloseLoop(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(5)
         while True:
             try:
                 await self._closeDuePollsTick()

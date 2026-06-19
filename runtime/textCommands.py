@@ -13,6 +13,7 @@ from db.sqlite import dbPath as sqliteDbPath
 from runtime import interaction as interactionRuntime
 from runtime import normalization
 from runtime.prefix import bg as prefixBg
+from runtime.prefix import bg_flag_sync as prefixBgFlagSync
 from runtime.prefix import copyserver as prefixCopyserver
 from runtime.prefix import runtime_admin as prefixRuntimeAdmin
 from runtime.prefix import utility as prefixUtility
@@ -194,6 +195,12 @@ class TextCommandRouter:
         gitCheckText = self._formatTerminalTime(gitStats.get("lastCheckAt"))
         gitUpdateText = self._formatTerminalTime(gitStats.get("lastUpdateAt"))
         gitResultText = str(gitStats.get("lastResult") or "idle").strip() or "idle"
+        gitEnabledText = "yes" if bool(gitStats.get("enabled")) else "no"
+        gitWorkerText = "running" if bool(gitStats.get("workerRunning")) else "stopped"
+        gitBehindText = str(int(gitStats.get("lastBehindCount") or 0))
+        gitErrorText = str(gitStats.get("lastError") or "").strip()
+        if len(gitErrorText) > 96:
+            gitErrorText = gitErrorText[:93] + "..."
 
         lines = [
             f"Jane Terminal :: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}",
@@ -204,9 +211,13 @@ class TextCommandRouter:
             f"cogs        {len(self.botClient.cogs)}",
             f"rss         {processResources.get('rss', 'unavailable')}",
             f"dbSize      {((self._dbPath().stat().st_size / (1024 * 1024)) if self._dbPath().exists() else 0.0):.2f} MB",
+            f"gitEnabled  {gitEnabledText}",
+            f"gitWorker   {gitWorkerText}",
             f"gitCheck    {gitCheckText}",
             f"gitUpdate   {gitUpdateText}",
             f"gitResult   {gitResultText}",
+            f"gitBehind   {gitBehindText}",
+            *([f"gitError    {gitErrorText}"] if gitErrorText else []),
             "-" * 54,
             "general-errors tail",
         ]
@@ -252,11 +263,17 @@ class TextCommandRouter:
     async def handleCopyServer(self, message: discord.Message) -> bool:
         return await prefixCopyserver.handleCopyServer(self, message)
 
+    async def handleViewAllChannels(self, message: discord.Message) -> bool:
+        return await prefixRuntimeAdmin.handleViewAllChannels(self, message)
+
     async def handleBgCheckCommand(self, message: discord.Message) -> bool:
         return await prefixBg.handleBgCheckCommand(self, message)
 
     async def handleBgLeaderboardCommand(self, message: discord.Message) -> bool:
         return await prefixBg.handleBgLeaderboardCommand(self, message)
+
+    async def handleJaneFlagSync(self, message: discord.Message) -> bool:
+        return await prefixBgFlagSync.handleJaneFlagSync(self, message)
 
     async def handlePermissionSimulatorCommand(self, message: discord.Message) -> bool:
         return await prefixUtility.handlePermissionSimulatorCommand(self, message)

@@ -13,6 +13,7 @@ from features.staff.anrdPayments import service as paymentService
 from features.staff.anrdPayments import workflowBridge as paymentWorkflowBridge
 from features.staff.workflows import rendering as workflowRendering
 from runtime import interaction as interactionRuntime
+from runtime import orbatAudit as orbatAuditRuntime
 from runtime import permissions as runtimePermissions
 from runtime import taskBudgeter
 from features.staff.sessions.Roblox import robloxUsers
@@ -338,7 +339,10 @@ class PaymentFinalPriceResponseView(discord.ui.View):
 
             syncMessage = ""
             if accepted:
-                syncOk, syncDetails = await self.cog.syncApprovedPaymentToOrbat(self.requestId)
+                syncOk, syncDetails = await self.cog.syncApprovedPaymentToOrbat(
+                    self.requestId,
+                    authorizedBy=f"{interaction.user.mention} (accepted negotiated price)",
+                )
                 if syncDetails:
                     prefix = "ORBAT sync completed:" if syncOk else "ORBAT sync failed:"
                     syncMessage = f"{prefix} {syncDetails}"
@@ -520,7 +524,10 @@ class AnrdPaymentReviewView(discord.ui.View):
 
                 syncMessage = ""
                 if status == "APPROVED":
-                    syncOk, syncDetails = await self.cog.syncApprovedPaymentToOrbat(self.requestId)
+                    syncOk, syncDetails = await self.cog.syncApprovedPaymentToOrbat(
+                        self.requestId,
+                        authorizedBy=interaction.user.mention,
+                    )
                     if syncDetails:
                         prefix = "ORBAT sync completed:" if syncOk else "ORBAT sync failed:"
                         syncMessage = f"{prefix} {syncDetails}"
@@ -902,7 +909,12 @@ class AnrdPaymentCog(commands.Cog):
         reason = str(roverResult.error or "No Roblox username linked in RoVer.")
         return None, reason
 
-    async def syncApprovedPaymentToOrbat(self, requestId: int) -> tuple[bool, str]:
+    async def syncApprovedPaymentToOrbat(
+        self,
+        requestId: int,
+        *,
+        authorizedBy: str = "",
+    ) -> tuple[bool, str]:
         if await paymentService.isPaymentPayoutSynced(requestId):
             return True, "Already synced."
 
@@ -965,6 +977,36 @@ class AnrdPaymentCog(commands.Cog):
             return False, reason
 
         await paymentService.markPaymentPayoutSynced(requestId)
+        try:
+            detailParts = [
+                f"Roblox: {username}",
+                f"Amount: {int(amount)}",
+                f"Section: {str(result.get('section') or 'Unknown section')}",
+            ]
+            rowNumber = int(result.get("row") or 0)
+            if rowNumber > 0:
+                detailParts.append(f"Row: {rowNumber}")
+            rankText = str(result.get("rank") or "").strip()
+            if rankText:
+                detailParts.append(f"Rank: {rankText}")
+            if result.get("rowCreated"):
+                detailParts.append("Action: created payout row")
+            await orbatAuditRuntime.sendOrbatChangeLog(
+                self.bot,
+                title="Spreadsheet Change",
+                change="Updated ANRD payment spreadsheet from approved payment request.",
+                requestedBy=f"<@{int(requestRow.get('submitterId') or 0)}>",
+                authorizedBy=str(authorizedBy or "").strip() or "ANRD payment approval",
+                requestMessageUrl=orbatAuditRuntime.buildDiscordMessageUrl(
+                    requestRow.get("guildId"),
+                    requestRow.get("reviewChannelId"),
+                    requestRow.get("reviewMessageId"),
+                ),
+                details=" | ".join(detailParts),
+                sheetKey="dept_anrd",
+            )
+        except Exception:
+            log.exception("Failed to post ANRD payment spreadsheet audit log for request %s.", requestId)
         section = str(result.get("section") or "Unknown section")
         rowNumber = int(result.get("row") or 0)
         if rowNumber > 0:

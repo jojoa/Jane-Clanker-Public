@@ -16,10 +16,10 @@ The updater exists so the production bot can pull safe code updates without tram
 ## Main Config
 
 - `JANE_ENABLE_AUTO_GIT_UPDATE`
-  Enables scheduled update checks.
+  Enables scheduled update checks. If this is not set to `1`, the background updater will not run. Manual `/restart` can still check/pull GitHub unless disabled separately.
 
-- `JANE_ALLOW_GIT_PULL_ON_RESTART`
-  Allows manual restart flows to pull before restarting.
+- `JANE_DISABLE_GIT_PULL_ON_RESTART`
+  Disables the manual `/restart` GitHub check/pull. By default, `/restart` checks GitHub and pulls safe code updates before restarting.
 
 - `autoGitUpdateRemote`
   Defaults to `origin`.
@@ -37,13 +37,16 @@ The updater exists so the production bot can pull safe code updates without tram
   Pause drain time before pulling.
 
 - `JANE_INSTALL_REQUIREMENTS_ON_UPDATE`
-  Defaults to on. When a pulled update changes `requirements.txt`, Jane runs `python -m pip install -r requirements.txt` with the same Python executable that is running the bot before she requests the restart.
+  Defaults to off unless enabled in the environment. When a pulled update changes `requirements.txt`, Jane runs `python -m pip install --disable-pip-version-check --break-system-packages -r requirements.txt` with the same Python executable that is running the bot before she requests the restart.
 
 - `autoGitUpdateDependencyInstallTimeoutSec`
   Dependency install timeout in seconds. Defaults to 600.
 
+- `autoGitUpdateGitCommandTimeoutSec`
+  Timeout for each Git command in seconds. Defaults to 120.
+
 - `autoGitUpdatePreservePaths`
-  Extra runtime paths to preserve during pull.
+  Extra runtime paths to preserve during pull. These extend the built-in defaults.
 
 ## Always-Preserved Paths
 
@@ -62,20 +65,21 @@ The default preserved folders are:
 
 - `backups/serverSnapshots`
 - `backups/serverSnapshotsOffsite`
+- `runtime/data/copyserver`
 
 Dirty files under preserved paths do not block the update. They are backed up before pull and restored afterward.
 
 ## Managed Merge Paths
 
-`config.py` is special.
+`config.py` and the focused modules under `settings/` are special.
 
-If local `config.py` differs from `HEAD`, Jane does the careful little dance before pulling:
+If local managed settings files differ from `HEAD`, Jane does the careful little dance before pulling:
 
 1. Parse top-level assignments from `HEAD`.
-2. Parse top-level assignments from local `config.py`.
+2. Parse top-level assignments from the local file.
 3. Record local assignment values that differ from `HEAD`.
 4. Pull from Git.
-5. Reapply those local values to the new `config.py` if the same assignment still exists.
+5. Reapply those local values to the new file if the same assignment still exists.
 
 This lets new upstream config fields arrive while keeping local server-specific values.
 
@@ -91,6 +95,7 @@ Jane skips pull if:
 - local code/config files changed outside preserved paths and managed config files
 - only preserved runtime paths changed upstream
 - the repo cannot fetch, inspect, or pull cleanly
+- the server cannot resolve/connect to GitHub
 
 Dirty snapshot or database files should not block the whole pull.
 
@@ -102,9 +107,9 @@ Dirty snapshot or database files should not block the whole pull.
 4. Inspect upstream changed paths and local dirty paths.
 5. If safe, pause Jane.
 6. Back up preserved paths.
-7. Temporarily stash preserved and merge-managed dirty paths.
+7. Re-check dirty paths, then temporarily stash the whole safe dirty worktree without pathspecs.
 8. Pull with `git pull --ff-only`.
-9. Reapply `config.py` local values when needed.
+9. Reapply managed settings local values when needed.
 10. Restore preserved runtime paths.
 11. If `requirements.txt` changed, run pip install against the updated requirements file.
 12. Drop the temporary stash.
@@ -112,13 +117,13 @@ Dirty snapshot or database files should not block the whole pull.
 
 ## Manual Restart Flow
 
-Manual restart can pull first only when:
+Manual `/restart` checks GitHub by default. It is treated as a deploy/update command, not a generic reboot button.
 
-- `JANE_ALLOW_GIT_PULL_ON_RESTART=1`
+If safe code changes are available, Jane pulls them, syncs dependencies if needed, signals the API task to stop, closes Discord, and relaunches.
 
-If manual pull is disabled, Jane restarts without pulling.
+If `JANE_DISABLE_GIT_PULL_ON_RESTART=1`, Jane cancels the restart instead of rebooting without an update.
 
-If local commits or blocking dirty files exist, Jane skips the pull and restarts.
+If there are no GitHub code changes, local commits, blocking dirty files, network failures, or other unsafe conditions, Jane cancels the restart and stays online.
 
 ## Failure Recovery
 
@@ -144,7 +149,19 @@ If a log says a temporary stash was kept, inspect it before doing any destructiv
   Check whether the assignment was renamed or removed upstream. Missing names are logged.
 
 - Pull works manually but not through Jane.
-  Check environment flags, branch config, Git availability, and whether Jane is paused.
+  Check `JANE_DISABLE_GIT_PULL_ON_RESTART`, branch config, Git availability, and whether Jane is paused.
+
+- Jane's terminal shows `gitEnabled no`.
+  Scheduled auto-update is off. Set `JANE_ENABLE_AUTO_GIT_UPDATE=1` on the host if you want background pulls.
+
+- Jane's terminal shows `gitResult network-unavailable`.
+  The host could not resolve/connect to GitHub. Check DNS/network on the server first; Jane will retry on the next scheduled interval.
+
+- Jane's terminal shows an old `gitCheck` time.
+  Either scheduled auto-update is disabled, the updater worker is stopped, or Jane has not reached `autoGitUpdateInitialDelaySec` yet.
+
+- Stash fails because a snapshot path disappeared.
+  That should not happen in the rebuilt updater. Jane no longer passes individual snapshot pathspecs to `git stash push`; she re-checks the worktree and stashes safe local changes in one command.
 
 - Update happens but no restart occurs.
   Check whether upstream changed only preserved runtime paths.

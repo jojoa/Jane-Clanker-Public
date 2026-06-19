@@ -62,6 +62,101 @@ async def createSession(
     )
     return sessionId
 
+
+async def recoverSessionFromMessageSnapshot(
+    *,
+    sessionId: int,
+    guildId: int,
+    channelId: int,
+    messageId: int,
+    sessionType: str,
+    hostId: int,
+    maxAttendeeLimit: int,
+    status: str,
+    attendeeGrades: list[tuple[int, str]],
+) -> Optional[Dict]:
+    normalizedSessionId = int(sessionId or 0)
+    normalizedGuildId = int(guildId or 0)
+    normalizedChannelId = int(channelId or 0)
+    normalizedMessageId = int(messageId or 0)
+    normalizedHostId = int(hostId or 0)
+    normalizedLimit = max(1, int(maxAttendeeLimit or 1))
+    normalizedType = str(sessionType or "orientation").strip().lower() or "orientation"
+    normalizedStatus = str(status or "FULL").strip().upper()
+    if normalizedStatus not in {"OPEN", "FULL", "GRADING"}:
+        normalizedStatus = "FULL"
+    if normalizedSessionId <= 0 or normalizedGuildId <= 0 or normalizedChannelId <= 0 or normalizedMessageId <= 0:
+        return None
+    if normalizedHostId <= 0:
+        return None
+
+    normalizedAttendees: list[tuple[int, str]] = []
+    seenUserIds: set[int] = set()
+    for rawUserId, rawGrade in attendeeGrades or []:
+        try:
+            userId = int(rawUserId)
+        except (TypeError, ValueError):
+            continue
+        if userId <= 0 or userId in seenUserIds:
+            continue
+        grade = str(rawGrade or "NOT_GRADED").strip().upper()
+        if grade not in {"NOT_GRADED", "PASS", "FAIL"}:
+            grade = "NOT_GRADED"
+        seenUserIds.add(userId)
+        normalizedAttendees.append((userId, grade))
+    if normalizedAttendees:
+        normalizedLimit = max(normalizedLimit, len(normalizedAttendees))
+
+    passwordHash = hashPassword(f"__recovered_session__:{normalizedSessionId}:{normalizedMessageId}")
+
+    async def _tx(db) -> Optional[Dict]:
+        async with db.execute(
+            "SELECT * FROM sessions WHERE sessionId = ?",
+            (normalizedSessionId,),
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing is not None:
+            return dict(existing)
+
+        await db.execute(
+            """
+            INSERT INTO sessions
+                (sessionId, guildId, channelId, messageId, sessionType, hostId, passwordHash, maxAttendeeLimit, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalizedSessionId,
+                normalizedGuildId,
+                normalizedChannelId,
+                normalizedMessageId,
+                normalizedType,
+                normalizedHostId,
+                passwordHash,
+                normalizedLimit,
+                normalizedStatus,
+            ),
+        )
+        if normalizedAttendees:
+            await db.executemany(
+                """
+                INSERT OR IGNORE INTO attendees (sessionId, userId, examGrade)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (normalizedSessionId, userId, grade)
+                    for userId, grade in normalizedAttendees
+                ],
+            )
+        async with db.execute(
+            "SELECT * FROM sessions WHERE sessionId = ?",
+            (normalizedSessionId,),
+        ) as cur:
+            recovered = await cur.fetchone()
+        return dict(recovered) if recovered is not None else None
+
+    return await runWriteTransaction(_tx)
+
+
 async def getSession(sessionId: int) -> Optional[Dict]:
     return await fetchOne("SELECT * FROM sessions WHERE sessionId = ?", (sessionId,))
 
@@ -74,7 +169,7 @@ async def getSessionsByStatus(statuses: List[str]) -> List[Dict]:
 
 
 async def expireStaleSessions(maxAgeHours: int = 48, statuses: Optional[List[str]] = None) -> List[int]:
-    targetStatuses = statuses or ["OPEN", "GRADING"]
+    targetStatuses = statuses or ["OPEN", "FULL", "GRADING"]
     if not targetStatuses:
         return []
 
@@ -475,26 +570,54 @@ async def getBgReviewSessionStats(sessionId: int) -> List[Dict]:
     )
 
 async def awardHostPointIfEligible(sessionId: int, userId: int):
-    # Called when BG is approved/rejected; points only on PASS + APPROVED, and only once.
-    session = await getSession(sessionId)
-    if not session:
-        return
-    attendee = await fetchOne(
-        "SELECT * FROM attendees WHERE sessionId = ? AND userId = ?",
-        (sessionId, userId)
-    )
-    if not attendee:
-        return
-    if attendee["credited"] == 1:
-        return
-    if attendee["examGrade"] == "PASS" and attendee["bgStatus"] == "APPROVED":
-        hostId = session["hostId"]
-        await execute("INSERT OR IGNORE INTO points (userId, pointsTotal) VALUES (?, 0)", (hostId,))
-        await execute("UPDATE points SET pointsTotal = pointsTotal + 1 WHERE userId = ?", (hostId,))
-        await execute(
-            "UPDATE attendees SET credited = 1 WHERE sessionId = ? AND userId = ?",
-            (sessionId, userId)
+    async def _tx(db) -> None:
+        async with db.execute(
+            """
+            SELECT s.hostId
+            FROM attendees a
+            JOIN sessions s ON s.sessionId = a.sessionId
+            WHERE a.sessionId = ?
+              AND a.userId = ?
+              AND a.credited = 0
+              AND a.examGrade = 'PASS'
+              AND a.bgStatus = 'APPROVED'
+            """,
+            (int(sessionId), int(userId)),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return
+
+        hostId = int(row["hostId"] or 0)
+        if hostId <= 0:
+            return
+
+        cur = await db.execute(
+            """
+            UPDATE attendees
+            SET credited = 1
+            WHERE sessionId = ?
+              AND userId = ?
+              AND credited = 0
+              AND examGrade = 'PASS'
+              AND bgStatus = 'APPROVED'
+            """,
+            (int(sessionId), int(userId)),
         )
+        if int(cur.rowcount or 0) != 1:
+            return
+
+        await db.execute(
+            """
+            INSERT INTO points (userId, pointsTotal)
+            VALUES (?, 1)
+            ON CONFLICT(userId) DO UPDATE SET
+                pointsTotal = points.pointsTotal + 1
+            """,
+            (hostId,),
+        )
+
+    await runWriteTransaction(_tx)
 
 async def hasPassedOrientation(userId: int) -> bool:
     row = await fetchOne(

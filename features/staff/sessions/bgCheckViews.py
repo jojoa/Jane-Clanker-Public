@@ -58,6 +58,7 @@ class BgCheckView(ui.View):
             self.targetUserId,
             newStatus,
             reviewBucket=self.reviewBucket,
+            defer=True,
             refreshBgCheckMessage=True,
         )
         await _dep("safeInteractionReply")(

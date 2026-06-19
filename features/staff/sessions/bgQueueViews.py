@@ -307,6 +307,7 @@ class BgQueueView(ui.View):
     async def finishBtn(self, interaction: discord.Interaction, _: ui.Button):
         if not await _dep("requireModPermission")(interaction):
             return
+        await _dep("safeInteractionDefer")(interaction, ephemeral=True)
 
         attendees = await _dep("service").getAttendees(self.sessionId)
         if not attendees:
@@ -369,6 +370,7 @@ class BgQueueView(ui.View):
     async def nextPendingBtn(self, interaction: discord.Interaction, _: ui.Button):
         if not await _dep("requireModPermission")(interaction):
             return
+        await _dep("safeInteractionDefer")(interaction, ephemeral=True)
         attendees = _dep("bgCandidates")(await _dep("service").getAttendees(self.sessionId), self.reviewBucket)
         pendingRows = [row for row in attendees if row.get("bgStatus") == "PENDING"]
         if not pendingRows:

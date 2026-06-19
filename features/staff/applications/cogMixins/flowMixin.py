@@ -388,10 +388,15 @@ class ApplicationsFlowMixin:
                     await orbatAuditRuntime.sendOrbatChangeLog(
                         self.bot,
                         change="Added or updated user in Recruitment ORBAT from an approved application.",
+                        requestedBy=f"<@{int(application.get('applicantId') or 0)}>",
                         authorizedBy=f"<@{int(reviewerId)}>" if reviewerId else "application approval",
+                        requestMessageUrl=orbatAuditRuntime.buildDiscordMessageUrl(
+                            application.get("guildId"),
+                            application.get("reviewChannelId"),
+                            application.get("reviewMessageId"),
+                        ),
                         details=(
-                            f"Applicant: <@{int(application.get('applicantId') or 0)}> | "
-                            f"Division: {divisionKey or 'Unknown'}"
+                            f"Division: {divisionKey or 'Unknown'} | Roblox: {robloxUsername}"
                         ),
                         sheetKey="recruitment",
                     )
@@ -425,10 +430,15 @@ class ApplicationsFlowMixin:
                 await orbatAuditRuntime.sendOrbatChangeLog(
                     self.bot,
                     change="Added or updated user in Department ORBAT from an approved application.",
+                    requestedBy=f"<@{int(application.get('applicantId') or 0)}>",
                     authorizedBy=f"<@{int(reviewerId)}>" if reviewerId else "application approval",
+                    requestMessageUrl=orbatAuditRuntime.buildDiscordMessageUrl(
+                        application.get("guildId"),
+                        application.get("reviewChannelId"),
+                        application.get("reviewMessageId"),
+                    ),
                     details=(
-                        f"Applicant: <@{int(application.get('applicantId') or 0)}> | "
-                        f"Division: {targetDivisionKey}"
+                        f"Division: {targetDivisionKey} | Roblox: {robloxUsername}"
                     ),
                     sheetKey=str(result.get("sheetKey") or "") or None,
                     divisionKey=targetDivisionKey,

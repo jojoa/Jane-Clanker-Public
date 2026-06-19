@@ -844,8 +844,14 @@ def scoreReport(
         score += points
         signals.append(RiskSignal(f"Prior Jane intelligence scan(s) were high risk: {highRiskRecent}.", points))
     if noScoreRecent >= 2:
-        score += 4
-        signals.append(RiskSignal(f"Repeated prior no-score intelligence result(s): {noScoreRecent}.", 4))
+        confidence -= 4
+        signals.append(
+            RiskSignal(
+                f"Repeated prior no-score intelligence result(s): {noScoreRecent}. Treat as repeated data/identity gaps, not risk proof.",
+                0,
+                "data",
+            )
+        )
     if priorReports > 0:
         signals.append(RiskSignal(f"Prior Jane intelligence reports found: {priorReports}.", 0, "data"))
 

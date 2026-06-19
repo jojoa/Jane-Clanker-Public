@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import math
 from dataclasses import dataclass
@@ -67,6 +67,33 @@ def _jsonDict(value: object) -> dict[str, Any]:
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
+def format_duration(minutes):
+    hours, mins = divmod(minutes, 60)
+
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if mins:
+        parts.append(f"{mins} minute" + ("s" if mins != 1 else ""))
+
+    return " ".join(parts) if parts else "0 minutes"
+
+async def _buildUserText(users: list[dict], guildId: int) -> str:
+    if not users:
+        return ""
+    usernames = []
+    for user in users:
+        try:
+            userId = int(user.get("userId") or 0)
+            lookup = await robloxUsers.fetchRobloxUser(
+                userId,
+                guildId
+            )
+            username = str(lookup.robloxUsername or "").strip()
+        except Exception:
+            username = ""
+        usernames.append(username)
+    return ", ".join(usernames)
 
 async def _rememberHonorGuardIdentity(
     *,
@@ -138,15 +165,15 @@ def _attendanceQuotaPoints(configModule: Any, eventType: str) -> float:
 def _attendancePromotionPoints(configModule: Any, eventType: str, durationMinutes: int) -> float:
     byType = _configuredComplexPointMap(configModule, "honorGuardAttendancePromotionPointsByEventType")
     intervall = max(1, int(getattr(configModule, "honorGuardAttendancePromotionPointsIntervallMinutes", 30) or 30))
-    points = byType.get(eventType, 0).get("base", 0) + byType.get(eventType, 0).get("per_intervall", 0) * durationMinutes // intervall
-    points = max(points, byType.get(eventType, 0).get("minimum", 0))
+    points = byType.get(eventType, {}).get("base", 0) + byType.get(eventType, {}).get("per_intervall", 0) * durationMinutes // intervall
+    points = max(points, byType.get(eventType, {}).get("minimum", 0))
     return float(points)
 
 def _supervisorPromotionPoints(configModule: Any, eventType: str, durationMinutes: int) -> float:
     byType = _configuredComplexPointMap(configModule, "honorGuardSupervisorPromotionPointsByEventType")
     intervall = max(1, int(getattr(configModule, "honorGuardAttendancePromotionPointsIntervallMinutes", 30) or 30))
-    points = byType.get(eventType, 0).get("base", 0) + byType.get(eventType, 0).get("per_intervall", 0) * durationMinutes // intervall
-    points = max(points, byType.get(eventType, 0).get("minimum", 0))
+    points = byType.get(eventType, {}).get("base", 0) + byType.get(eventType, {}).get("per_intervall", 0) * durationMinutes // intervall
+    points = max(points, byType.get(eventType, {}).get("minimum", 0))
     return float(points)
 
 
@@ -160,7 +187,7 @@ def calculatePointDeltas(
     configModule: Any,
     memberGroup: str = "",
     eventType: str = "",
-    participationRole: str = "attendee",
+    participantRole: str = "ATTENDEE",
     durationMinutes: int = 0,
     attendeeCount: int = 0,
     gradedAttendeeCount: int = 0,
@@ -168,7 +195,7 @@ def calculatePointDeltas(
     screenAssist: bool = False,
 ) -> HonorGuardPointDeltas:
     normalizedEvent = _normalizeKey(eventType).lower()
-    normalizedRole = _normalizeKey(participationRole).lower()
+    normalizedRole = _normalizeKey(participantRole).upper()
     group = str(memberGroup or "").strip().lower()
     attendeeTotal = max(0, int(attendeeCount or 0))
     gradedTotal = max(0, int(gradedAttendeeCount or 0))
@@ -179,61 +206,61 @@ def calculatePointDeltas(
     attendanceEligible = group in {"enlisted", "nco"}
     officerLike = group in {"officer", "nco", ""}
 
-    if normalizedEvent not in {"jge", "nco_exam"}:
-        if normalizedRole == "attendee":
+    if normalizedEvent not in {"jge", "ncoe"}:
+        if normalizedRole == "ATTENDEE":
             if attendanceEligible:
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
                 promotionEventPoints = _attendancePromotionPoints(configModule, normalizedEvent, durationMinutes)
             elif normalizedEvent == "inspection":
                 promotionEventPoints = _attendancePromotionPoints(configModule, normalizedEvent, durationMinutes) or 8
 
-        elif normalizedRole == "host":
+        elif normalizedRole == "HOST":
             if officerLike:
                 hostMap = _configuredPointMap(configModule, "honorGuardHostPromotionPointsByEventType")
                 promotionEventPoints = float(hostMap.get(normalizedEvent, 0))
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
 
-        elif normalizedRole == "supervisor":
+        elif normalizedRole == "SUPERVISOR":
             if officerLike:
                 promotionEventPoints = _supervisorPromotionPoints(configModule, normalizedEvent, durationMinutes)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
 
-        elif normalizedRole == "cohost":
+        elif normalizedRole == "COHOST":
             if officerLike:
                 promotionEventPoints = _attendancePromotionPoints(configModule, normalizedEvent, durationMinutes)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
 
     if normalizedEvent == "jge":
-        if normalizedRole == "host":
+        if normalizedRole == "HOST":
             rate = float(getattr(configModule, "honorGuardJgePointsPerGradedAttendee", 0.75) or 0.75)
             promotionEventPoints = _ceilPoints(rate * attendeeTotal)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
-        elif normalizedRole in {"cohost", "supervisor"}:
+        elif normalizedRole in {"COHOST", "SUPERVISOR"}:
             rate = float(getattr(configModule, "honorGuardJgePointsPerGradedAttendee", 0.75) or 0.75)
             promotionEventPoints = _ceilPoints(rate * gradedTotal)
             if group == "nco":
                 quotaPoints = _attendanceQuotaPoints(configModule, normalizedEvent)
-        elif normalizedRole == "attendee" and passed:
+        elif normalizedRole == "ATTENDEE" and passed:
             quotaPoints = _attendanceQuotaPoints(configModule, "jge")
             promotionEventPoints = _attendancePromotionPoints(configModule, "jge", durationMinutes)
 
-    if normalizedEvent == "nco_exam":
+    if normalizedEvent == "ncoe":
         rate = float(getattr(configModule, "honorGuardNcoExamPointsPerGradedAttendee", 1.5) or 1.5)
         screenAssistPoints = float(getattr(configModule, "honorGuardNcoExamScreenAssistPoints", 2) or 2)
-        if normalizedRole == "host":
+        if normalizedRole == "HOST":
             promotionEventPoints = _ceilPoints(rate * attendeeTotal)
-        elif normalizedRole in {"cohost", "supervisor"}:
+        elif normalizedRole in {"COHOST", "SUPERVISOR"}:
             if screenAssist:
                 promotionEventPoints = screenAssistPoints
             if gradedTotal > 0:
                 promotionEventPoints += _ceilPoints(rate * gradedTotal)
-        elif normalizedRole == "attendee" and passed:
-            quotaPoints = _attendanceQuotaPoints(configModule, "nco_exam")
-            promotionEventPoints = _attendancePromotionPoints(configModule, "nco_exam", durationMinutes)
+        elif normalizedRole == "ATTENDEE" and passed:
+            quotaPoints = _attendanceQuotaPoints(configModule, "ncoe")
+            promotionEventPoints = _attendancePromotionPoints(configModule, "ncoe", durationMinutes)
 
     return HonorGuardPointDeltas(
         quotaPoints=float(quotaPoints),
@@ -326,7 +353,14 @@ async def listEventPendingStatuses() -> List[Dict]:
     )
     enrichedSubmissions = []
     for submission in submissions:
+        metadata = _jsonDict(submission.get("metadataJson"))
         enriched = dict(submission)
+        enriched["eventId"] = int(metadata.get("eventRecordId") or 0)
+        enriched["imageUrls"] = [
+            str(value).strip()
+            for value in metadata.get("imageUrls", [])
+            if str(value).strip()
+        ] if isinstance(metadata.get("imageUrls"), list) else []
         enrichedSubmissions.append(enriched)
 
     return enrichedSubmissions
@@ -639,17 +673,17 @@ async def createAttendanceRecord(
     *,
     eventId: int,
     guildId: int,
-    targetUserId: int,
+    userId: int,
     memberGroup: str,
-    participationRole: str = "ATTENDEE",
+    participantRole: str = "ATTENDEE",
     createdBy: int = 0,
 ) -> int:
     recordId = await executeReturnId(
         """
         INSERT INTO hg_attendance_records
             (
-                eventId, guildId, targetUserId,
-                participationRole, memberGroup,
+                eventId, guildId, userId,
+                participantRole, memberGroup,
                 createdBy
             )
         VALUES (?, ?, ?, ?, ?, ?)
@@ -657,8 +691,8 @@ async def createAttendanceRecord(
         (
             int(eventId),
             int(guildId),
-            int(targetUserId),
-            participationRole.upper(),
+            int(userId),
+            participantRole.upper(),
             str(memberGroup or "").strip().upper(),
             int(createdBy or 0),
         ),
@@ -668,22 +702,38 @@ async def createAttendanceRecord(
 async def removeAttendanceRecord(
     *,
     eventId: int,
-    targetUserId: int,
+    userId: int,
 ) -> int:
     await execute(
         """
         DELETE FROM hg_attendance_records
         WHERE eventId = ?
-          AND targetUserId = ?
+          AND userId = ?
         """,
         (
             int(eventId),
-            int(targetUserId),
+            int(userId),
         ),
     )
     return 1
 
-
+async def updateAttendeePoints(
+    *,
+    recordId: int,
+    points: HonorGuardPointDeltas,
+) -> None:
+    await execute(
+        """
+        UPDATE hg_attendance_records
+        SET quotaPoints = ?, promotionEventPoints = ?
+        WHERE recordId = ?
+        """,
+        (
+            float(points.quotaPoints),
+            float(points.promotionEventPoints),
+            int(recordId),
+        ),
+    )
 
 async def createSoloSentryLog(
     *,
@@ -877,6 +927,7 @@ async def createEventSubmission(
         }
     )
     await execute("""UPDATE hg_event_records SET submissionId = ? WHERE eventId = ? """, (submissionId, int(eventId)))
+    return submissionId
 
 async def createEventRecord(
     *,
@@ -887,17 +938,18 @@ async def createEventRecord(
     hostId: int = 0,
     attendeeCount: int = 0,
     metadata: object = None,
+    channelId: int = 0,
     createdById: int = 0,
 ) -> int:
-    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    timestamp = datetime.now().isoformat(timespec="minutes")
     return await executeReturnId(
         """
         INSERT INTO hg_event_records
             (
-                guildId, eventType, eventTitle, eventDate, hostId,
+                guildId, eventType, eventTitle, eventDate, hostId, channelId,
                 attendeeCount, metadataJson, createdBy, startedAt
             )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(guildId),
@@ -905,6 +957,7 @@ async def createEventRecord(
             str(eventTitle or "").strip(),
             str(eventDate or "").strip(),
             int(hostId or 0),
+            int(channelId or 0),
             int(attendeeCount or 0),
             _jsonText(metadata),
             int(createdById or 0),
@@ -921,6 +974,16 @@ async def setEventRecordMessageId(eventId: int, messageId: int) -> None:
         WHERE eventId = ?
         """,
         (int(messageId or 0), int(eventId)),
+    )
+
+async def setEventRecordDuration(eventId: int, duration: int) -> None:
+    await execute(
+        """
+        UPDATE hg_event_records
+        SET durationMinutes = ?, updatedAt = datetime('now')
+        WHERE eventId = ?
+        """,
+        (int(duration or 0), int(eventId)),
     )
 
 
@@ -965,10 +1028,15 @@ async def getEventSubmission(submissionId: int) -> Optional[dict[str, Any]]:
     if str(submission.get("submissionType") or "").strip().upper() != "EVENT_RECORD":
         return None
 
+    metadata = _jsonDict(submission.get("metadataJson"))
     enriched = dict(submission)
+    enriched["eventId"] = int(metadata.get("eventRecordId") or 0)
+    enriched["imageUrls"] = [
+        str(value).strip()
+        for value in metadata.get("imageUrls", [])
+        if str(value).strip()
+    ] if isinstance(metadata.get("imageUrls"), list) else []
     return enriched
-
-
 
 async def getEventRecord(eventId: int) -> Optional[dict[str, Any]]:
     record = await fetchOne(
@@ -978,36 +1046,69 @@ async def getEventRecord(eventId: int) -> Optional[dict[str, Any]]:
     if record is None:
         return None
     enriched = dict(record)
-    enriched["startedAt"] = datetime.fromisoformat(str(record.get("createdAt") or "")).astimezone(timezone.utc)
-
+    enriched["startedAt"] = datetime.fromisoformat(str(record.get("startedAt")))
+    enriched["eventDate"] = datetime.fromisoformat(str(record.get("eventDate")))
     return enriched
+
+async def updateEventSubmissionStatus(
+    submissionId: int,
+    eventId: int,
+    status: str,
+    *,
+    reviewerId: int,
+    note: str | None = None,
+    threadId: int | None = None,
+) -> None:
+    details = {"threadId": int(threadId)} if int(threadId or 0) > 0 else None
+    await setSubmissionStatus(
+        submissionId=int(submissionId),
+        status=str(status or "").strip().upper(),
+        reviewerId=int(reviewerId or 0),
+        note=str(note or "").strip(),
+        details=details,
+    )
+    await updateEventRecordStatus(
+        eventId=int(eventId),
+        status=str(status or "").strip().upper(),
+    )
 
 
 async def syncEventRecordToSheets(eventId: int) -> dict[str, Any]:
-    ##NOT USED ATM
     record = await getEventRecord(int(eventId))
     if record is None:
         raise ValueError(f"Honor Guard event record not found: {eventId}")
 
+    if str(record.get("eventType") or "").strip() == "orientation":
+        return {"eventId": int(eventId), "archiveSynced": False, "eventHostUpdate": None}
+
     from features.staff.honorGuard import sheets as honorGuardSheets
 
-    hostText = str(record.get("hostRobloxUsername") or "").strip()
-    if not hostText and int(record.get("hostId") or 0) > 0:
-        hostText = str(int(record.get("hostId") or 0))
+    attendees = await listHonorGuardAttendees(int(record.get("eventId") or 0))
+    supervisors = [attendee for attendee in attendees if str(attendee.get("participantRole") or "").strip().upper() == "SUPERVISOR"]
+    cohosts = [attendee for attendee in attendees if str(attendee.get("participantRole") or "").strip().upper() == "COHOST"]
+
+    hostLookup = await robloxUsers.fetchRobloxUser(
+        int(record.get("hostId") or 0),
+        int(record.get("guildId") or 0)
+    )
+    hostText = str(hostLookup.robloxUsername or "").strip()
+    supervisorText = await _buildUserText(supervisors, int(record.get("guildId") or 0))
+    coHostText = await _buildUserText(cohosts, int(record.get("guildId") or 0))
     metadata = _jsonDict(record.get("metadataJson"))
     scheduleEventId = str(metadata.get("scheduleEventId") or metadata.get("eventId") or "").strip()
     eventType = str(record.get("eventType") or "").strip()
     eventTitle = str(record.get("eventTitle") or "").strip()
     eventDetail = str(metadata.get("eventDetail") or eventTitle).strip()
+    eventDate: datetime = record.get("eventDate", datetime.now())
     honorGuardSheets.archiveEvent(
         honorGuardSheets.HonorGuardArchiveRecord(
-            eventType=eventType,
-            eventTimeUtc=str(record.get("eventDate") or "").strip(),
+            eventType=eventType.title(),
+            eventTimeUtc=str(eventDate.strftime("%Y/%m/%d %I:%M %p")),
             eventTitle=eventTitle,
             host=hostText,
-            coHosts=str(metadata.get("coHosts") or "").strip(),
-            supervisors=str(metadata.get("supervisors") or "").strip(),
-            eventDuration=str(metadata.get("eventDuration") or "").strip(),
+            coHosts=coHostText,
+            supervisors=supervisorText,
+            eventDuration=format_duration(record.get("durationMinutes") or "").strip(),
             eventDetail=eventDetail,
             attendeeCount=int(record.get("attendeeCount") or 0),
             notes=str(metadata.get("notes") or "").strip(),
@@ -1025,6 +1126,7 @@ async def syncEventRecordToSheets(eventId: int) -> dict[str, Any]:
 
 
 async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
+    count = 0
     submission = await getSubmission(int(submissionId))
     if submission is None:
         raise ValueError(f"Honor Guard submission not found: {submissionId}")
@@ -1063,19 +1165,21 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
             promotionAwardedDelta=float(submission.get("promotionAwardedPoints") or 0),
         )
     else:
+        eventId = int(_jsonDict(submission.get("metadataJson")).get("eventRecordId"))
         ## Maybe in the future also use a batch writer
-        for attendanceRecord in await listHonorGuardAttendees(int(submission.get("metadataJson", {}) or {}).get("eventId", 0)):
+        for attendanceRecord in await listHonorGuardAttendees(eventId):
             lookup = await robloxUsers.fetchRobloxUser(
-                int(attendanceRecord.get("targetUserId") or 0),
+                int(attendanceRecord.get("userId") or 0),
                 int(submission.get("guildId") or 0)
             )
             targetRobloxUsername = str(lookup.robloxUsername or "").strip()
-            honorGuardSheets.applyMemberPointDeltas(
-                discordId=int(attendanceRecord.get("targetUserId") or 0),
+            updateResult = honorGuardSheets.applyMemberPointDeltas(
+                discordId=int(attendanceRecord.get("userId") or 0),
                 robloxUsername=targetRobloxUsername,
                 quotaDelta=attendanceRecord.get("quotaPoints") or 0,
                 promotionEventDelta=attendanceRecord.get("promotionEventPoints") or 0,
             )
+            count += 1
 
     await execute(
         """
@@ -1100,26 +1204,43 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
             """,
             (int(submissionId),),
         )
-    await _appendSubmissionEvent(
-        submissionId=int(submissionId),
-        actorId=int(submission.get("reviewerId") or 0),
-        eventType="SHEET_SYNCED",
-        fromStatus="APPROVED",
-        toStatus="APPROVED",
-        details={
+    if str(submission.get("submissionType") or "").strip().upper() == "EVENT_RECORD":
+        await _appendSubmissionEvent(
+            submissionId=int(submissionId),
+            actorId=int(submission.get("reviewerId") or 0),
+            eventType="SHEET_SYNCED",
+            fromStatus="APPROVED",
+            toStatus="APPROVED",
+            details={
+                "count": count,
+            },
+        )
+        return {
+            "alreadySynced": False,
+            "submissionId": int(submissionId),
+        }
+    else:
+        await _appendSubmissionEvent(
+            submissionId=int(submissionId),
+            actorId=int(submission.get("reviewerId") or 0),
+            eventType="SHEET_SYNCED",
+            fromStatus="APPROVED",
+            toStatus="APPROVED",
+            details={
+                "row": updateResult.row,
+                "quotaPoints": updateResult.quotaPoints,
+                "promotionTotalPoints": updateResult.promotionTotalPoints,
+            },
+        )
+        return {
+            "alreadySynced": False,
+            "submissionId": int(submissionId),
             "row": updateResult.row,
+            "robloxUsername": updateResult.robloxUsername,
             "quotaPoints": updateResult.quotaPoints,
+            "promotionEventPoints": updateResult.promotionEventPoints,
+            "promotionAwardedPoints": updateResult.promotionAwardedPoints,
             "promotionTotalPoints": updateResult.promotionTotalPoints,
-        },
-    )
-    return {
-        "alreadySynced": False,
-        "submissionId": int(submissionId),
-        "row": updateResult.row,
-        "robloxUsername": updateResult.robloxUsername,
-        "quotaPoints": updateResult.quotaPoints,
-        "promotionEventPoints": updateResult.promotionEventPoints,
-        "promotionAwardedPoints": updateResult.promotionAwardedPoints,
-        "promotionTotalPoints": updateResult.promotionTotalPoints,
-        "activityStatus": updateResult.activityStatus,
-    }
+            "activityStatus": updateResult.activityStatus,
+        }
+

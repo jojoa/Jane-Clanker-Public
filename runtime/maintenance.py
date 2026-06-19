@@ -184,6 +184,7 @@ class MaintenanceCoordinator:
             await self.orbatAuditRuntime.sendOrbatChangeLog(
                 self.botClient,
                 change="Sorted General Staff ORBAT sections.",
+                requestedBy=authorizedBy,
                 authorizedBy=authorizedBy,
                 details=f"Sections touched: {sections}, rows updated: {updated}",
                 sheetKey="generalStaff",
@@ -203,6 +204,7 @@ class MaintenanceCoordinator:
             await self.orbatAuditRuntime.sendOrbatChangeLog(
                 self.botClient,
                 change="Recruitment ORBAT touchup applied.",
+                requestedBy=authorizedBy,
                 authorizedBy=authorizedBy,
                 details=details,
                 sheetKey="recruitment",
@@ -231,6 +233,7 @@ class MaintenanceCoordinator:
                 await self.orbatAuditRuntime.sendOrbatChangeLog(
                     self.botClient,
                     change="Sorted ANRD Payment Manager sections.",
+                    requestedBy=authorizedBy,
                     authorizedBy=authorizedBy,
                     details=f"Sections sorted: {sectionsSorted}",
                     sheetKey="dept_anrd",
@@ -256,6 +259,7 @@ class MaintenanceCoordinator:
             await self.orbatAuditRuntime.sendOrbatChangeLog(
                 self.botClient,
                 change=f"{divisionLabel} ORBAT touchup applied.",
+                requestedBy=authorizedBy,
                 authorizedBy=authorizedBy,
                 details=details,
                 sheetKey=sheetKey or None,
@@ -595,6 +599,23 @@ class MaintenanceCoordinator:
             result.get("points", 0),
             resetRows,
         )
+        if self.orbatAuditRuntime is not None and resetRows > 0:
+            try:
+                await self.orbatAuditRuntime.sendOrbatChangeLog(
+                    self.botClient,
+                    title="Spreadsheet Change",
+                    change="Reset Recruitment monthly points.",
+                    requestedBy="scheduled monthly maintenance",
+                    authorizedBy="scheduled monthly maintenance",
+                    details=(
+                        f"Rows reset: {int(resetRows)} | "
+                        f"Users processed for payout: {int(result.get('users', 0) or 0)} | "
+                        f"Points processed: {int(result.get('points', 0) or 0)}"
+                    ),
+                    sheetKey="recruitment",
+                )
+            except Exception:
+                log.exception("Failed to emit recruitment monthly reset audit log.")
 
     async def expireStaleSessionsIfDue(self, *, force: bool = False) -> None:
         if self._isPaused():
@@ -762,7 +783,9 @@ class MaintenanceCoordinator:
         if delaySec > 0:
             await asyncio.sleep(delaySec)
         try:
-            self.lastConfigSanitySummary = await self.configSanity.runConfigSanityCheck(self.botClient)
+            self.lastConfigSanitySummary = await self.taskBudgeter.runLowPriorityDiscord(
+                lambda: self.configSanity.runConfigSanityCheck(self.botClient)
+            )
             if isinstance(self.lastConfigSanitySummary, dict):
                 warningCount = int(self.lastConfigSanitySummary.get("warningCount", 0) or 0)
                 errorCount = int(self.lastConfigSanitySummary.get("errorCount", 0) or 0)

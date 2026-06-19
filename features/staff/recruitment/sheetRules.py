@@ -259,25 +259,6 @@ def resolveConfiguredRankLabel(rankName: str) -> str:
     return rankName
 
 
-def nextPromotionRank(currentRank: str, allTimePoints: int) -> Optional[str]:
-    currentNorm = normalize(currentRank)
-    recruiterNorm = normalize("Recruiter")
-    seniorNorm = normalize("Senior Recruiter")
-    leadNorm = normalize("Lead Recruiter")
-
-    if currentNorm not in {recruiterNorm, seniorNorm, leadNorm}:
-        return None
-
-    toSeniorAt = int(getattr(config, "recruitmentPromoteRecruiterToSeniorAt", 10) or 10)
-    toLeadAt = int(getattr(config, "recruitmentPromoteSeniorToLeadAt", 20) or 20)
-
-    if allTimePoints >= toLeadAt and currentNorm in {recruiterNorm, seniorNorm}:
-        return resolveConfiguredRankLabel("Lead Recruiter")
-    if allTimePoints >= toSeniorAt and currentNorm == recruiterNorm:
-        return resolveConfiguredRankLabel("Senior Recruiter")
-    return None
-
-
 def sectionInsertRow(usernames: list, sectionNames: list[str]) -> Optional[int]:
     for sectionName in sectionNames:
         bounds = sectionBoundsByHeader(usernames, sectionName)

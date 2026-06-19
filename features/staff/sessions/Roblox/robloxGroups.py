@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import config
 from features.staff.sessions.Roblox import robloxPayloads, robloxTransport
-from features.staff.sessions.Roblox.robloxModels import RobloxAcceptResult, RobloxGroupsResult
+from features.staff.sessions.Roblox.robloxModels import (
+    RobloxAcceptResult,
+    RobloxGroupRolesResult,
+    RobloxGroupsResult,
+)
 
 
 async def acceptJoinRequest(robloxUserId: int) -> RobloxAcceptResult:
@@ -101,6 +105,56 @@ async def fetchRobloxGroups(robloxUserId: int) -> RobloxGroupsResult:
         cacheKey,
         result,
         ttlName="robloxGroupCacheTtlSec",
+        defaultTtlSec=3600,
+    )
+    return result
+
+
+async def fetchRobloxGroupRoles(groupId: int) -> RobloxGroupRolesResult:
+    safeGroupId = int(groupId or 0)
+    if safeGroupId <= 0:
+        return RobloxGroupRolesResult([], 0, error="Missing Roblox group ID.")
+    cached = robloxTransport.cacheGet(
+        "groupRoles",
+        safeGroupId,
+        ttlName="robloxGroupRolesCacheTtlSec",
+        defaultTtlSec=3600,
+    )
+    if isinstance(cached, RobloxGroupRolesResult):
+        return cached
+
+    url = f"https://groups.roblox.com/v1/groups/{safeGroupId}/roles"
+    try:
+        status, data = await robloxTransport.requestJson("GET", url, timeoutSec=10)
+    except Exception as exc:
+        return RobloxGroupRolesResult([], 0, error=str(exc))
+
+    if status != 200 or not isinstance(data, dict):
+        return RobloxGroupRolesResult([], status, error=f"Roblox group roles lookup failed ({status}).")
+
+    rawRoles = data.get("roles", [])
+    if not isinstance(rawRoles, list):
+        return RobloxGroupRolesResult([], status, error="Roblox group roles lookup returned invalid data.")
+
+    roles: list[dict] = []
+    for entry in rawRoles:
+        if not isinstance(entry, dict):
+            continue
+        roles.append(
+            {
+                "id": robloxPayloads.optionalInt(entry.get("id")),
+                "name": str(entry.get("name") or "").strip(),
+                "rank": robloxPayloads.optionalInt(entry.get("rank")),
+                "memberCount": robloxPayloads.optionalInt(entry.get("memberCount")),
+            }
+        )
+    roles.sort(key=lambda item: int(item.get("rank") or 0))
+    result = RobloxGroupRolesResult(roles, status)
+    robloxTransport.cacheSet(
+        "groupRoles",
+        safeGroupId,
+        result,
+        ttlName="robloxGroupRolesCacheTtlSec",
         defaultTtlSec=3600,
     )
     return result

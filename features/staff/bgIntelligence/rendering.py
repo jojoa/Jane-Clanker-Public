@@ -122,6 +122,44 @@ def _formatRobux(value: Any) -> str:
     return f"{_safeInt(value):,} Robux"
 
 
+def _formatElapsedSeconds(value: Any) -> str:
+    try:
+        seconds = max(0.0, float(value))
+    except (TypeError, ValueError):
+        return "unknown"
+    if seconds >= 3600:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        remainder = seconds % 60
+        return f"{hours}h {minutes}m {remainder:.2f}s"
+    if seconds >= 60:
+        minutes = int(seconds // 60)
+        remainder = seconds % 60
+        return f"{minutes}m {remainder:.2f}s"
+    return f"{seconds:.2f}s"
+
+
+def _debugTimingLines(report: Any) -> list[str]:
+    summary = getattr(report, "debugTimingSummary", None) or {}
+    if not isinstance(summary, dict) or not summary:
+        return []
+    rows: list[str] = []
+    totalSeconds = summary.get("totalSeconds")
+    if totalSeconds is not None:
+        rows.append(f"Total scan time: `{_formatElapsedSeconds(totalSeconds)}`")
+    uiSeconds = summary.get("uiSeconds")
+    if uiSeconds is not None:
+        rows.append(f"Progress UI latency: `{_formatElapsedSeconds(uiSeconds)}`")
+    for step in list(summary.get("steps") or []):
+        if not isinstance(step, dict):
+            continue
+        label = str(step.get("label") or "").strip()
+        if not label:
+            continue
+        rows.append(f"{label}: `{_formatElapsedSeconds(step.get('seconds'))}`")
+    return rows
+
+
 def _compactConfidenceValue(score: scoring.RiskScore) -> str:
     return f"{score.confidenceLabel} ({int(score.confidence)}%)"
 
@@ -167,6 +205,24 @@ def _robloxProfileLink(report: Any) -> str | None:
     if not profileUrl:
         return None
     return f"[{_markdownLinkLabel(_displayName(report))}]({profileUrl})"
+
+
+def _robloxCatalogUrl(assetId: object) -> str | None:
+    try:
+        parsed = int(assetId)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return f"https://www.roblox.com/catalog/{parsed}"
+
+
+def _robloxCatalogLink(assetId: object, label: object) -> str:
+    url = _robloxCatalogUrl(assetId)
+    cleanLabel = _markdownLinkLabel(label or f"Asset {assetId}")
+    if not url:
+        return cleanLabel
+    return f"[{cleanLabel}]({url})"
 
 
 def _publicHeaderLine(report: Any, prefix: str = "Background Check Overview") -> str:
@@ -251,6 +307,109 @@ def _itemLine(item: dict[str, Any]) -> str:
         detailParts.append(f"+{extraSignals} more signal(s)")
     suffix = f" | {', '.join(detailParts)}" if detailParts else ""
     return f"{itemName} [{itemId}]{creatorText}{suffix}"
+
+
+def _inventoryFlagReason(item: dict[str, Any]) -> str:
+    matchType = str(item.get("matchType") or "").strip().lower()
+    matchMode = str(item.get("matchMode") or "").strip().lower()
+    keyword = str(item.get("keyword") or "").strip()
+    referenceItemId = item.get("referenceItemId")
+    if matchType == "visual":
+        if referenceItemId:
+            return f"thumbnail similarity to {_robloxCatalogLink(referenceItemId, f'item {referenceItemId}')}"
+        return "thumbnail similarity to a previously flagged item"
+    if matchType == "keyword":
+        if keyword:
+            if matchMode == "fuzzy":
+                try:
+                    fuzzyScore = f"{float(item.get('fuzzyScore')):.0f}"
+                except (TypeError, ValueError):
+                    fuzzyScore = "?"
+                return f"item name looked similar to keyword `{keyword}` ({fuzzyScore})"
+            if matchMode == "normalized":
+                return f"item name normalized to keyword `{keyword}`"
+            return f"item name matched keyword `{keyword}`"
+        return "item name matched a configured keyword"
+    if matchType == "item":
+        return "exact item ID matched a configured flagged item"
+    if matchType == "creator":
+        creatorId = item.get("creatorId")
+        if creatorId:
+            return f"creator matched flagged creator `{creatorId}`"
+        return "creator matched a configured flagged creator"
+    reason = str(item.get("reason") or "").strip()
+    return reason or "flagged during the inventory scan"
+
+
+def _inventoryFlagSummaryReason(item: dict[str, Any]) -> str:
+    matchType = str(item.get("matchType") or "").strip().lower()
+    matchMode = str(item.get("matchMode") or "").strip().lower()
+    keyword = str(item.get("keyword") or "").strip()
+    if matchType == "visual":
+        referenceItemId = item.get("referenceItemId")
+        referenceName = (
+            str(item.get("referenceItemName") or "").strip()
+            or str(item.get("referenceName") or "").strip()
+            or (f"item {referenceItemId}" if referenceItemId else "")
+        )
+        if referenceItemId:
+            return f"similar to {_robloxCatalogLink(referenceItemId, referenceName or f'item {referenceItemId}')}"
+        return "similar to a previously flagged item"
+    if matchType == "keyword":
+        if keyword:
+            if matchMode == "fuzzy":
+                return f"matched keyword `{keyword}` (fuzzy)"
+            if matchMode == "normalized":
+                return f"matched keyword `{keyword}` (normalized)"
+            return f"matched keyword `{keyword}`"
+        return "matched a configured keyword"
+    if matchType == "item":
+        return "previously flagged item"
+    if matchType == "creator":
+        creatorName = str(item.get("creatorName") or "").strip()
+        creatorId = item.get("creatorId")
+        if creatorName and creatorId:
+            return f"flagged creator {creatorName} (`{creatorId}`)"
+        if creatorId:
+            return f"flagged creator `{creatorId}`"
+        return "flagged creator"
+    return _inventoryFlagReason(item)
+
+
+def _inventoryFlagSummaryLine(item: dict[str, Any]) -> str:
+    itemName = _truncate(item.get("name") or "Unknown item", 72)
+    itemId = item.get("id") or "?"
+    itemLink = _robloxCatalogLink(itemId, itemName)
+    reason = _inventoryFlagSummaryReason(item)
+    extraSignals = max(0, int(item.get("matchCount") or 0) - 1)
+    extraText = f" (+{extraSignals} more signal(s))" if extraSignals > 0 else ""
+    return f"{itemLink} - {reason}{extraText}"
+
+
+def _inventoryFlagSummaryLines(report: Any, *, limit: int = 3) -> list[str]:
+    flaggedItems = [
+        item
+        for item in list(getattr(report, "flaggedItems", None) or [])
+        if isinstance(item, dict)
+    ]
+    if not flaggedItems:
+        return []
+    visibleLimit = max(1, int(limit or 1))
+    rows = [_inventoryFlagSummaryLine(item) for item in flaggedItems[:visibleLimit]]
+    remaining = len(flaggedItems) - len(rows)
+    if remaining > 0:
+        rows.append(f"... and {remaining} more flagged item(s)")
+    return ["Item summary:", *rows]
+
+
+def _inventoryFlagDetailedLine(item: dict[str, Any]) -> str:
+    itemName = item.get("name") or "Unknown item"
+    itemId = item.get("id") or "?"
+    itemLink = _robloxCatalogLink(itemId, itemName)
+    reason = _inventoryFlagReason(item)
+    extraSignals = max(0, int(item.get("matchCount") or 0) - 1)
+    extraText = f" (+{extraSignals} more signal(s))" if extraSignals > 0 else ""
+    return f"{itemLink} - flagged because {reason}{extraText}."
 
 
 def _badgeLine(badge: dict[str, Any]) -> str:
@@ -627,6 +786,7 @@ def _badgeTimelineLines(report: Any) -> list[str]:
         formattedSources = []
         sourceLabels = {
             "awarded_dates_endpoint": "Roblox award-date endpoint",
+            "open_cloud_inventory": "Roblox inventory API",
             "user_badges_endpoint": "Roblox badge list",
             "badge_history_next_cursor": "badge-page cursor",
             "badge_history_previous_cursor": "badge-page cursor",
@@ -828,6 +988,7 @@ def _sourceProvenanceLines(report: Any) -> list[str]:
             "Visual matching: "
             f"refs `{_safeInt(inventorySummary.get('visualReferenceCount'))}`, "
             f"candidates `{_safeInt(inventorySummary.get('visualCandidateCount'))}`, "
+            f"compared `{_safeInt(inventorySummary.get('visualComparedCandidateCount'))}`, "
             f"hits `{_safeInt(inventorySummary.get('visualMatchedCount'))}`"
         )
         if inventorySummary.get("visualError"):
@@ -979,7 +1140,7 @@ def _inventoryDetailLines(report: Any) -> list[str]:
         rows = [_overviewInventoryLine(report)]
         if flaggedItems:
             rows.append("Configured item flags:")
-            rows.extend(_itemLine(item) for item in flaggedItems[:10] if isinstance(item, dict))
+            rows.extend(_inventoryFlagDetailedLine(item) for item in flaggedItems[:10] if isinstance(item, dict))
         return rows
     rows = [
         f"Items scanned: `{_safeInt(summary.get('itemsScanned')):,}` across `{_safeInt(summary.get('pagesScanned')):,}` page(s)",
@@ -1010,7 +1171,10 @@ def _inventoryDetailLines(report: Any) -> list[str]:
         rows.append(
             "Visual thumbnail matches: "
             f"`{_safeInt(summary.get('visualMatchedCount')):,}` "
-            f"(candidates `{_safeInt(summary.get('visualCandidateCount')):,}`, refs `{_safeInt(summary.get('visualReferenceCount')):,}`)"
+            f"(candidates `{_safeInt(summary.get('visualCandidateCount')):,}`, "
+            f"compared `{_safeInt(summary.get('visualComparedCandidateCount')):,}`, "
+            f"refs `{_safeInt(summary.get('visualReferenceCount')):,}`, "
+            f"color-blocked `{_safeInt(summary.get('visualColorMismatchSkippedCount')):,}`)"
         )
         rows.append(
             "Keyword hits: "
@@ -1026,7 +1190,8 @@ def _inventoryDetailLines(report: Any) -> list[str]:
             "multi-signal items: "
             f"`{_safeInt(summary.get('multiSignalMatchCount')):,}`"
         )
-        rows.extend(_itemLine(item) for item in flaggedItems[:10] if isinstance(item, dict))
+        rows.append("Flagged items:")
+        rows.extend(_inventoryFlagDetailedLine(item) for item in flaggedItems[:10] if isinstance(item, dict))
     else:
         rows.append("Suspicious item hits: `0`")
     return rows
@@ -1411,12 +1576,23 @@ def applyBadgeTimelineGraph(
     return graphFile
 
 
-def _publicScanLines(score: scoring.RiskScore) -> list[str]:
-    return [
+def _publicScanLines(
+    score: scoring.RiskScore,
+    *,
+    report: Any | None = None,
+    itemLimit: int = 3,
+) -> list[str]:
+    rows = [
         f"Review Band: **{_publicBandValue(score)}**",
         f"Review Risk: **{_publicReviewRiskValue(score)}**",
         f"Confidence: **{_compactConfidenceValue(score)}**",
     ]
+    if report is not None:
+        itemSummaryLines = _inventoryFlagSummaryLines(report, limit=itemLimit)
+        if itemSummaryLines:
+            rows.append("")
+            rows.extend(itemSummaryLines)
+    return rows
 
 
 def _signalText(signal: scoring.RiskSignal) -> str:
@@ -1434,6 +1610,7 @@ def _signalText(signal: scoring.RiskSignal) -> str:
 def _scanReasonLines(
     score: scoring.RiskScore,
     *,
+    report: Any | None = None,
     cautionLimit: int = 5,
     reassuringLimit: int = 5,
     dataLimit: int = 4,
@@ -1454,7 +1631,7 @@ def _scanReasonLines(
         for signal in signals
         if signal not in caution and signal not in reassuring
     ]
-    rows = _publicScanLines(score)
+    rows = _publicScanLines(score, report=report)
     rows.append("")
     rows.append("Why Jane is cautious:")
     cautionLimit = max(1, int(cautionLimit or 5))
@@ -1494,12 +1671,13 @@ _PUBLIC_SECTION_LABELS = {
     "badges": "Badges",
     "external": "Safety Records",
     "history": "Jane History",
+    "debug": "Debug Timings",
 }
 
 
 def _publicSectionField(report: Any, section: str, score: scoring.RiskScore) -> tuple[str, str]:
     if section == "scan":
-        lines = _scanReasonLines(score, cautionLimit=10, reassuringLimit=10, dataLimit=10)
+        lines = _scanReasonLines(score, report=report, cautionLimit=10, reassuringLimit=10, dataLimit=10)
         directMatches = [
             match
             for match in list(getattr(report, "directMatches", None) or [])
@@ -1562,6 +1740,8 @@ def _publicSectionField(report: Any, section: str, score: scoring.RiskScore) -> 
         return "[Records] Safety Records", _listLines(lines, limit=28)
     if section == "history":
         return "[History] Jane History", _listLines(_priorDetailLines(report), limit=28)
+    if section == "debug":
+        return "[Debug] Timings", _listLines(_debugTimingLines(report), empty="No debug timings recorded.", limit=28)
     return "[Overview] Overview", "Unknown section."
 
 
@@ -1572,6 +1752,46 @@ def _listLines(rows: list[str], *, empty: str = "(none)", limit: int = 8) -> str
     if len(rows) > limit:
         visible.append(f"... and {len(rows) - limit} more")
     return _truncate("\n".join(visible))
+
+
+def _chunkFieldValues(
+    rows: list[str],
+    *,
+    empty: str = "(none)",
+    maxChars: int = _FIELD_LIMIT,
+    maxRowsPerField: int = 18,
+) -> list[str]:
+    if not rows:
+        return [empty]
+    chunks: list[str] = []
+    currentRows: list[str] = []
+    for row in rows:
+        cleanRow = str(row or "").strip()
+        if not cleanRow:
+            cleanRow = "(blank)"
+        candidateRows = currentRows + [cleanRow]
+        candidateText = "\n".join(candidateRows)
+        if currentRows and (len(candidateText) > maxChars or len(candidateRows) > maxRowsPerField):
+            chunks.append(_truncate("\n".join(currentRows), maxChars))
+            currentRows = [cleanRow]
+            continue
+        currentRows = candidateRows
+    if currentRows:
+        chunks.append(_truncate("\n".join(currentRows), maxChars))
+    return chunks or [empty]
+
+
+def _debugSectionFields(report: Any) -> list[tuple[str, str]]:
+    chunks = _chunkFieldValues(
+        _debugTimingLines(report),
+        empty="No debug timings recorded.",
+        maxRowsPerField=16,
+    )
+    fields: list[tuple[str, str]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        suffix = "" if index == 1 else f" ({index})"
+        fields.append((f"[Debug] Timings{suffix}", chunk))
+    return fields
 
 
 def _statusBlock(status: str, error: Optional[str], rows: list[str]) -> str:
@@ -1600,8 +1820,11 @@ def buildReportEmbed(
     _field(
         embed,
         "[Scan] Detection Summary",
-        _listLines(_publicScanLines(score), limit=3),
+        _listLines(_publicScanLines(score, report=report), limit=9),
     )
+    debugLines = _debugTimingLines(report)
+    if debugLines:
+        _field(embed, "[Debug] Timings", _listLines(debugLines, limit=18))
     _field(embed, "[Profile] Profile Information", _overviewProfileLine(report))
     _field(embed, "[Connections] Connections", _overviewConnectionLine(report))
     _field(embed, "[Groups] Groups", _overviewGroupLine(report))
@@ -1644,8 +1867,12 @@ def buildPublicSectionEmbed(
         timestamp=datetime.now(timezone.utc),
     )
 
-    fieldName, fieldValue = _publicSectionField(report, normalized, score)
-    _field(embed, fieldName, fieldValue)
+    if normalized == "debug":
+        for fieldName, fieldValue in _debugSectionFields(report):
+            _field(embed, fieldName, fieldValue)
+    else:
+        fieldName, fieldValue = _publicSectionField(report, normalized, score)
+        _field(embed, fieldName, fieldValue)
 
     footer = (
         "Use Overview to return to the full overview. "
@@ -1731,14 +1958,21 @@ def buildSectionEmbed(
                     f"Items scanned: `{_safeInt(summary.get('itemsScanned')):,}`",
                     f"Unique assets: `{_safeInt(summary.get('uniqueAssetCount')):,}`",
                     f"Suspicious item hits: `{_safeInt(summary.get('flaggedItemCount'), len(items)):,}`",
-                    f"Visual matches: `{_safeInt(summary.get('visualMatchedCount')):,}` from `{_safeInt(summary.get('visualCandidateCount')):,}` candidate(s)",
+                    f"Visual matches: `{_safeInt(summary.get('visualMatchedCount')):,}` from `{_safeInt(summary.get('visualComparedCandidateCount')):,}` same-type candidate(s) (`{_safeInt(summary.get('visualCandidateCount')):,}` collected)",
                     f"Keyword hits: `{_safeInt(summary.get('keywordMatchCount')):,}` exact / `{_safeInt(summary.get('normalizedKeywordMatchCount')):,}` normalized / `{_safeInt(summary.get('fuzzyKeywordMatchCount')):,}` fuzzy",
                 ]
             )
             if summary.get("visualError"):
                 rows.append(f"Visual note: {_truncate(summary.get('visualError'), 220)}")
         embed.add_field(name="Inventory", value=_truncate("\n".join(rows)), inline=False)
-        embed.add_field(name="Flagged Items", value=_listLines([_itemLine(item) for item in items], limit=20), inline=False)
+        embed.add_field(
+            name="Flagged Items",
+            value=_listLines(
+                [_inventoryFlagDetailedLine(item) for item in items if isinstance(item, dict)],
+                limit=12,
+            ),
+            inline=False,
+        )
     elif normalized == "games":
         games = list(getattr(report, "favoriteGames", None) or [])
         flaggedGames = list(getattr(report, "flaggedFavoriteGames", None) or [])
@@ -1967,7 +2201,7 @@ def buildReportText(
                 f"Items Scanned: {_safeInt(inventorySummary.get('itemsScanned'))}",
                 f"Unique Assets: {_safeInt(inventorySummary.get('uniqueAssetCount'))}",
                 f"Suspicious Item Hits: {_safeInt(inventorySummary.get('flaggedItemCount'))}",
-                f"Visual Matches: {_safeInt(inventorySummary.get('visualMatchedCount'))} from {_safeInt(inventorySummary.get('visualCandidateCount'))} candidate(s)",
+                f"Visual Matches: {_safeInt(inventorySummary.get('visualMatchedCount'))} from {_safeInt(inventorySummary.get('visualComparedCandidateCount'))} same-type candidate(s) ({_safeInt(inventorySummary.get('visualCandidateCount'))} collected); color-blocked {_safeInt(inventorySummary.get('visualColorMismatchSkippedCount'))}",
                 "Keyword Hits: "
                 f"{_safeInt(inventorySummary.get('keywordMatchCount'))} exact / "
                 f"{_safeInt(inventorySummary.get('normalizedKeywordMatchCount'))} normalized / "
@@ -2064,6 +2298,11 @@ def buildReportText(
 
     lines.extend(["", "Jane History"])
     lines.extend(_priorDetailLines(report) or ["(none)"])
+
+    debugLines = _debugTimingLines(report)
+    if debugLines:
+        lines.extend(["", "Debug Timings"])
+        lines.extend(debugLines)
 
     lines.extend(
         [

@@ -15,6 +15,7 @@ from runtime import cogGuards as runtimeCogGuards
 from runtime import interaction as interactionRuntime
 from runtime import orgProfiles
 from runtime import timezones as timezoneRuntime
+from runtime import transientNetwork
 from runtime import viewBases as runtimeViewBases
 
 log = logging.getLogger(__name__)
@@ -255,6 +256,17 @@ class CurfewCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             return await guild.fetch_member(int(userId))
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return None
+        except Exception as exc:
+            if transientNetwork.isLikelyTransientNetworkError(exc):
+                log.warning(
+                    "Curfew member lookup skipped; network/DNS appears unavailable (guild=%s user=%s): %s",
+                    int(getattr(guild, "id", 0) or 0),
+                    int(userId),
+                    exc,
+                    extra={"skipErrorMirrorDm": True},
+                )
+                return None
+            raise
 
     async def _resolveMemberFromInput(self, guild: discord.Guild | None, rawValue: str) -> discord.Member | None:
         if guild is None:
@@ -327,6 +339,17 @@ class CurfewCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             )
         except (discord.Forbidden, discord.HTTPException):
             return False
+        except Exception as exc:
+            if transientNetwork.isLikelyTransientNetworkError(exc):
+                log.warning(
+                    "Curfew timeout skipped; network/DNS appears unavailable (guild=%s user=%s): %s",
+                    int(guildId),
+                    int(userId),
+                    exc,
+                    extra={"skipErrorMirrorDm": True},
+                )
+                return False
+            raise
 
         return True
 
@@ -378,14 +401,25 @@ class CurfewCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                     timezoneName,
                 )
                 applied += appliedForTarget
-            except Exception:
-                log.exception(
-                    "Curfew enforcement failed for org=%s sourceGuild=%s user=%s timezone=%s",
-                    orgKey,
-                    guildId,
-                    userId,
-                    timezoneName,
-                )
+            except Exception as exc:
+                if transientNetwork.isLikelyTransientNetworkError(exc):
+                    log.warning(
+                        "Curfew enforcement skipped; network/DNS appears unavailable (org=%s sourceGuild=%s user=%s timezone=%s): %s",
+                        orgKey,
+                        guildId,
+                        userId,
+                        timezoneName,
+                        exc,
+                        extra={"skipErrorMirrorDm": True},
+                    )
+                else:
+                    log.exception(
+                        "Curfew enforcement failed for org=%s sourceGuild=%s user=%s timezone=%s",
+                        orgKey,
+                        guildId,
+                        userId,
+                        timezoneName,
+                    )
         return checked, applied
 
     async def _runCurfewLoop(self) -> None:
@@ -396,8 +430,15 @@ class CurfewCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 checked, applied = await self._enforceCurfewOnce()
                 if checked > 0 and applied > 0:
                     log.info("Curfew enforcement: checked=%d, applied=%d", checked, applied)
-            except Exception:
-                log.exception("Curfew enforcement loop error.")
+            except Exception as exc:
+                if transientNetwork.isLikelyTransientNetworkError(exc):
+                    log.warning(
+                        "Curfew enforcement tick skipped; network/DNS appears unavailable: %s",
+                        exc,
+                        extra={"skipErrorMirrorDm": True},
+                    )
+                else:
+                    log.exception("Curfew enforcement loop error.")
             await asyncio.sleep(intervalSec)
 
     async def _requireAdmin(self, interaction: discord.Interaction) -> bool:

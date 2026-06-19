@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from db.sqlite import execute, executeMany, executeReturnId, fetchAll, fetchOne
+from db.sqlite import execute, executeReturnId, fetchAll, fetchOne, runWriteTransaction
 
 
 async def createBestOfPoll(
@@ -91,10 +91,6 @@ async def replaceBestOfCandidates(
     pollId: int,
     candidates: list[dict],
 ) -> None:
-    await execute(
-        "DELETE FROM best_of_poll_candidates WHERE pollId = ?",
-        (int(pollId),),
-    )
     params: list[tuple] = []
     for entry in candidates:
         params.append(
@@ -107,15 +103,23 @@ async def replaceBestOfCandidates(
                 int(entry["sortOrder"]),
             )
         )
-    if params:
-        await executeMany(
-            """
-            INSERT INTO best_of_poll_candidates
-                (pollId, userId, priorityRank, priorityLabel, displayName, sortOrder)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            params,
+
+    async def _tx(db) -> None:
+        await db.execute(
+            "DELETE FROM best_of_poll_candidates WHERE pollId = ?",
+            (int(pollId),),
         )
+        if params:
+            await db.executemany(
+                """
+                INSERT INTO best_of_poll_candidates
+                    (pollId, userId, priorityRank, priorityLabel, displayName, sortOrder)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                params,
+            )
+
+    await runWriteTransaction(_tx)
 
 
 async def listBestOfCandidates(pollId: int) -> list[dict]:

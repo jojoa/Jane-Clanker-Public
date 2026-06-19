@@ -39,7 +39,7 @@ Important assumptions:
 - `_loadHeaderMap(...)` combines configured row-model columns with headers found in the first 10 rows
 - missing required headers raise `RuntimeError`
 - rank labels, quota thresholds, section headers, and promotion thresholds come from `config.py`
-- formula-aware reads matter here. The sheet facade must pass options like `valueRenderOption="FORMULA"` through to Google Sheets so Jane does not overwrite all-time formulas.
+- formula-aware reads matter here. The sheet facade must pass options like `valueRenderOption="FORMULA"` through to Google Sheets so Jane can preserve and extend formula-backed all-time cells instead of flattening them.
 
 Required header keys are:
 

@@ -102,7 +102,47 @@ class TrainingLogCoordinator:
             )
         except (TypeError, ValueError):
             days = 365
-        return max(7, min(days, 365))
+        return max(1, min(days, 365))
+
+    def _historyLimitForOrg(
+        self,
+        key: str,
+        orgKey: str | None,
+        *,
+        default: int,
+        maximum: int,
+    ) -> int | None:
+        try:
+            configured = int(
+                orgProfiles.getOrganizationValue(
+                    self.config,
+                    key,
+                    orgKey=orgKey,
+                    default=default,
+                )
+                or default
+            )
+        except (TypeError, ValueError):
+            configured = default
+        if configured <= 0:
+            return None
+        return max(1, min(configured, maximum))
+
+    def _startupBackfillMessageLimitForOrg(self, orgKey: str | None) -> int | None:
+        return self._historyLimitForOrg(
+            "trainingLogStartupBackfillMessageLimit",
+            orgKey,
+            default=250,
+            maximum=5000,
+        )
+
+    def _archiveIndexLimitForOrg(self, orgKey: str | None) -> int | None:
+        return self._historyLimitForOrg(
+            "trainingLogArchiveIndexLimit",
+            orgKey,
+            default=500,
+            maximum=10000,
+        )
 
     def _summaryWebhookName(self) -> str:
         return self._summaryWebhookNameForOrg(None)
@@ -562,11 +602,12 @@ class TrainingLogCoordinator:
         archiveChannel: discord.TextChannel | discord.Thread,
         *,
         orgKey: str,
+        limit: int | None = None,
     ) -> dict[int, int] | None:
         mirroredSourceIds: dict[int, int] = {}
         scannedCount = 0
         try:
-            async for message in archiveChannel.history(limit=None):
+            async for message in archiveChannel.history(limit=limit):
                 scannedCount += 1
                 sourceMessageId = self._sourceMessageIdFromMirrorMessage(message)
                 if sourceMessageId > 0 and sourceMessageId not in mirroredSourceIds:
@@ -585,11 +626,12 @@ class TrainingLogCoordinator:
             return None
 
         log.info(
-            "Training mirror archive index built: org=%s channelId=%s scanned=%s found=%s.",
+            "Training mirror archive index built: org=%s channelId=%s scanned=%s found=%s limit=%s.",
             str(orgKey or "").strip().upper() or "UNKNOWN",
             int(getattr(archiveChannel, "id", 0) or 0),
             scannedCount,
             len(mirroredSourceIds),
+            str(limit or "none"),
         )
         return mirroredSourceIds
 
@@ -1105,14 +1147,23 @@ class TrainingLogCoordinator:
                         archiveChannelId,
                     )
                 else:
-                    archiveMirrorIndex = await self._buildArchiveMirrorIndex(archiveChannel, orgKey=orgKey)
+                    archiveMirrorIndex = await self._buildArchiveMirrorIndex(
+                        archiveChannel,
+                        orgKey=orgKey,
+                        limit=None if force else self._archiveIndexLimitForOrg(orgKey),
+                    )
 
                 cutoff = now - timedelta(days=self._backfillDaysForOrg(orgKey))
+                messageLimit = None if force else self._startupBackfillMessageLimitForOrg(orgKey)
                 scannedCount = 0
                 capturedCount = 0
                 failedCount = 0
                 try:
-                    async for message in sourceChannel.history(limit=None, after=cutoff, oldest_first=True):
+                    async for message in sourceChannel.history(
+                        limit=messageLimit,
+                        after=cutoff,
+                        oldest_first=True,
+                    ):
                         scannedCount += 1
                         try:
                             captured = await self._captureRelevantMessage(
@@ -1148,6 +1199,14 @@ class TrainingLogCoordinator:
                 except Exception:
                     log.exception("Failed to backfill training-results messages for org %s.", orgKey)
                     orgResult["reason"] = "history-read-failed"
+                if messageLimit is not None and scannedCount >= messageLimit and not orgResult.get("reason"):
+                    orgResult["reason"] = "message-limit-reached"
+                    log.warning(
+                        "Training log startup backfill hit message limit: org=%s sourceChannelId=%s limit=%s.",
+                        orgKey,
+                        sourceChannelId,
+                        messageLimit,
+                    )
 
                 orgResult["scannedCount"] = int(scannedCount)
                 orgResult["capturedCount"] = int(capturedCount)

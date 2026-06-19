@@ -107,7 +107,7 @@ class BgInfoActionsView(ui.View):
         if not robloxUserId:
             await self.safeInteractionReply(
                 interaction,
-                content="No Roblox account linked via RoVer for this attendee.",
+                content="No linked Roblox account found for this attendee.",
                 ephemeral=True,
             )
             return
@@ -347,7 +347,7 @@ async def sendBgInfoForTarget(
     elif robloxUsername:
         embed.add_field(name="Roblox Account", value=robloxUsername, inline=False)
     else:
-        embed.add_field(name="Roblox Account", value="Not linked via RoVer.", inline=False)
+        embed.add_field(name="Roblox Account", value="Not linked.", inline=False)
     if normalizedBucket == bgBuckets.adultBgReviewBucket and flaggedGroups:
         embed.add_field(
             name="Flagged Groups",

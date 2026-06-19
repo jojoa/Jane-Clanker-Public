@@ -537,16 +537,25 @@ async def syncApprovedLogsToSheet(
 async def sendRecruitmentSheetChangeLog(
     botClient: discord.Client,
     *,
-    reviewerId: int,
+    reviewerId: int = 0,
+    authorizedBy: str = "",
+    requestedBy: str = "",
+    requestMessageUrl: str = "",
     change: str,
     details: str,
     sheetKey: str = "recruitment",
 ) -> None:
     try:
+        authorText = str(authorizedBy or "").strip()
+        if not authorText:
+            normalizedReviewerId = int(reviewerId or 0)
+            authorText = f"<@{normalizedReviewerId}>" if normalizedReviewerId > 0 else "system"
         await orbatAuditRuntime.sendOrbatChangeLog(
             botClient,
             change=change,
-            authorizedBy=f"<@{int(reviewerId)}>",
+            authorizedBy=authorText,
+            requestedBy=str(requestedBy or "").strip() or authorText,
+            requestMessageUrl=str(requestMessageUrl or "").strip(),
             details=details,
             sheetKey=sheetKey,
         )

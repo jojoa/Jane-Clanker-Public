@@ -36,10 +36,6 @@ def defaultClientSecretsPath() -> Path:
     if configured:
         return resolveLocalPath(configured)
 
-    matches = sorted(repoRoot().glob("client_secret_*.json"))
-    if matches:
-        return matches[0]
-
     return repoRoot() / "localOnly" / "credentials" / "google-oauth-client-secret.json"
 
 

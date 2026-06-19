@@ -1,5 +1,6 @@
 ﻿from typing import Any, Optional, Dict
 
+import time
 import config
 from features.staff.recruitment import sheetRules
 from features.staff.orbat.a1 import cellRange, columnIndex, indexToColumn
@@ -10,6 +11,7 @@ from features.staff.orbat.multiEngine import getMultiOrbatEngine
 _recruitmentSheetKey = "recruitment"
 _engine = getMultiOrbatEngine()
 _serviceFacade = None
+_rowLookupCache: dict[tuple[str, str, str, str], tuple[float, dict[str, int]]] = {}
 
 
 def _getService():
@@ -52,7 +54,6 @@ _isManagerRank = sheetRules.isManagerRank
 _normalizeQuotaStatus = sheetRules.normalizeQuotaStatus
 _computeQuotaStatus = sheetRules.computeQuotaStatus
 _resolveConfiguredRankLabel = sheetRules.resolveConfiguredRankLabel
-_nextPromotionRank = sheetRules.nextPromotionRank
 _sectionInsertRow = sheetRules.sectionInsertRow
 
 
@@ -70,6 +71,58 @@ def _indexToColumn(index1: int) -> str:
 
 def _range(col: str, row: int) -> str:
     return cellRange(_sheetName(), col, row)
+
+
+def _rowLookupCacheTtlSec() -> float:
+    try:
+        value = float(getattr(config, "recruitmentRowLookupCacheTtlSec", 120) or 120)
+    except (TypeError, ValueError):
+        value = 120.0
+    return max(0.0, value)
+
+
+def _invalidateRowLookupCaches() -> None:
+    _rowLookupCache.clear()
+
+
+def _configuredRecruitmentRanks() -> list[str]:
+    configured = [
+        str(item).strip()
+        for item in (getattr(config, "recruitmentAllowedRanks", []) or [])
+        if str(item).strip()
+    ]
+    if configured:
+        return configured
+    return [
+        "Commissioner 1 IC",
+        "Comissioner 1 IC",
+        "Head Recruiter 1 IC",
+        "Head Recruiter 2 IC",
+        "Head Recruiter 3 IC",
+        "Head Recruiter 4 IC",
+        "Recruitment Manager",
+        "Recruitment Supervisor",
+        "Lead Recruiter",
+        "Senior Recruiter",
+        "Recruiter",
+    ]
+
+
+def _buildAllTimeWriteValue(
+    currentValue: Any,
+    currentFormula: Any,
+    pointsDelta: int,
+) -> Any | None:
+    delta = max(0, int(pointsDelta))
+    formulaText = str(currentFormula or "").strip()
+    if formulaText.startswith("="):
+        innerFormula = formulaText[1:].strip()
+        if delta <= 0:
+            return None
+        if innerFormula:
+            return f"=({innerFormula})+{delta}"
+        return delta
+    return _toInt(currentValue) + delta
 
 
 def _fillEmptyCellsWithZero(
@@ -461,6 +514,8 @@ def _ensureSectionSpacerRows(service, usernameCol: str) -> int:
             inserted += 1
         rowIndex += 1
 
+    if inserted:
+        _invalidateRowLookupCaches()
     return inserted
 
 
@@ -626,6 +681,7 @@ def _insertMissingMemberRow(
         spreadsheetId=_spreadsheetId(),
         body={"valueInputOption": "USER_ENTERED", "data": data},
     ).execute()
+    _invalidateRowLookupCaches()
     _applyRecruitmentRowFormatting(service, insertRow, sheetId=sheetId)
     return insertRow
 
@@ -670,6 +726,7 @@ def _deleteEmptyNameRowsInMembersSection(
         spreadsheetId=_spreadsheetId(),
         body={"requests": deleteRequests},
     ).execute()
+    _invalidateRowLookupCaches()
     return len(emptyRows)
 
 
@@ -752,6 +809,7 @@ def _writeMovableRows(
         spreadsheetId=_spreadsheetId(),
         body={"valueInputOption": "USER_ENTERED", "data": data},
     ).execute()
+    _invalidateRowLookupCaches()
 
 
 def _sortRowsPreserveNonSortableSlots(
@@ -942,6 +1000,7 @@ def _loadHeaderMap(service) -> Dict[str, str]:
     rowModel = sheetConfig.rowModel if isinstance(sheetConfig.rowModel, dict) else {}
     identityModel = rowModel.get("identity") if isinstance(rowModel.get("identity"), dict) else {}
     pointModel = rowModel.get("pointColumns") if isinstance(rowModel.get("pointColumns"), dict) else {}
+    profileModel = rowModel.get("profileColumns") if isinstance(rowModel.get("profileColumns"), dict) else {}
 
     identityColumn = str(identityModel.get("robloxUserColumn") or "").strip().upper()
     if identityColumn:
@@ -955,6 +1014,22 @@ def _loadHeaderMap(service) -> Dict[str, str]:
     for key, col in pointColumnMap.items():
         if col:
             out[key] = col
+
+    profileColumnMap = {
+        "rsRank": str(profileModel.get("rank") or "").strip().upper(),
+        "quota": str(profileModel.get("quota") or "").strip().upper(),
+        "status": str(profileModel.get("status") or "").strip().upper(),
+        "loaExpiration": str(profileModel.get("loaExpiration") or "").strip().upper(),
+        "notes": str(profileModel.get("notes") or "").strip().upper(),
+    }
+    for key, col in profileColumnMap.items():
+        if col:
+            out[key] = col
+
+    required = {"robloxUsername", "rsRank", "monthly", "allTime", "quota", "patrols", "status"}
+    optional = {"loaExpiration", "notes"}
+    if required.issubset(out.keys()) and optional.issubset(out.keys()):
+        return out
 
     rows = (
         service.spreadsheets()
@@ -988,7 +1063,6 @@ def _loadHeaderMap(service) -> Dict[str, str]:
             if key in out:
                 continue
             out[key] = _columnLetter(idx)
-    required = {"robloxUsername", "rsRank", "monthly", "allTime", "quota", "patrols", "status"}
     missing = [key for key in required if key not in out]
     if missing:
         raise RuntimeError(f"Recruitment sheet headers missing: {', '.join(missing)}")
@@ -996,33 +1070,15 @@ def _loadHeaderMap(service) -> Dict[str, str]:
 
 
 def _findRowByRobloxUsername(service, usernameColumn: str, rankColumn: str, username: str) -> Optional[int]:
-    valueRanges = (
-        service.spreadsheets()
-        .values()
-        .batchGet(
-            spreadsheetId=_spreadsheetId(),
-            ranges=[
-                f"{_sheetName()}!{usernameColumn}:{usernameColumn}",
-                f"{_sheetName()}!{rankColumn}:{rankColumn}",
-            ],
-        )
-        .execute()
-        .get("valueRanges", [])
-    )
-    usernames = valueRanges[0].get("values", []) if len(valueRanges) > 0 else []
-    ranks = valueRanges[1].get("values", []) if len(valueRanges) > 1 else []
     target = _usernameLookupKey(username)
-    totalRows = max(len(usernames), len(ranks))
-    for idx in range(1, totalRows + 1):
-        usernameRow = usernames[idx - 1] if idx - 1 < len(usernames) else []
-        rankRow = ranks[idx - 1] if idx - 1 < len(ranks) else []
-        usernameCell = _cleanRobloxUsername(usernameRow[0]) if usernameRow else ""
-        rankCell = str(rankRow[0]).strip() if rankRow else ""
-        if not _isWritableMemberRow(usernameCell, rankCell):
-            continue
-        if _usernameLookupKey(usernameCell) == target:
-            return idx
-    return None
+    if not target:
+        return None
+    rowByUsername = _loadWritableMemberRowsByUsername(
+        service,
+        _spreadsheetId(),
+        {"robloxUsername": usernameColumn, "rsRank": rankColumn},
+    )
+    return rowByUsername.get(target)
 
 
 def _roleRankOrderMap() -> Dict[str, int]:
@@ -1216,6 +1272,7 @@ def _moveRowPreserveFormatting(
         spreadsheetId=_spreadsheetId(),
         body={"requests": requests},
     ).execute()
+    _invalidateRowLookupCaches()
     return targetRow
 
 
@@ -1428,14 +1485,13 @@ def applyApprovedLog(
             return ""
 
     currentRank = str(_at(0) or "").strip()
-    monthly = _toInt(_at(1)) + max(0, int(pointsDelta))
-    allTime = _toInt(_at(2)) + max(0, int(pointsDelta))
+    pointsDeltaValue = max(0, int(pointsDelta))
+    monthly = _toInt(_at(1)) + pointsDeltaValue
     patrols = _toInt(_at(3)) + max(0, int(patrolDelta))
     currentQuotaStatus = str(_at(4) or "").strip()
     allTimeFormula = str(_formulaAt(2) or "").strip()
-    promotedRank = _nextPromotionRank(currentRank, allTime)
-    rankForQuota = promotedRank or currentRank
-    quotaStatus = _computeQuotaStatus(rankForQuota, monthly, patrols, currentQuotaStatus)
+    allTimeWriteValue = _buildAllTimeWriteValue(_at(2), allTimeFormula, pointsDeltaValue)
+    quotaStatus = _computeQuotaStatus(currentRank, monthly, patrols, currentQuotaStatus)
 
     data = [
         {"range": _range(header["robloxUsername"], row), "values": [[robloxUsername]]},
@@ -1443,10 +1499,8 @@ def applyApprovedLog(
         {"range": ranges["patrols"], "values": [[patrols]]},
         {"range": ranges["quota"], "values": [[quotaStatus]]},
     ]
-    if not allTimeFormula.startswith("="):
-        data.append({"range": ranges["allTime"], "values": [[allTime]]})
-    if promotedRank and _normalize(promotedRank) != _normalize(currentRank):
-        data.append({"range": ranges["rsRank"], "values": [[promotedRank]]})
+    if allTimeWriteValue is not None:
+        data.append({"range": ranges["allTime"], "values": [[allTimeWriteValue]]})
     service.spreadsheets().values().batchUpdate(
         spreadsheetId=_spreadsheetId(),
         body={"valueInputOption": "USER_ENTERED", "data": data},
@@ -1501,6 +1555,13 @@ def _aggregateApprovedLogUpdates(updates: list[dict]) -> dict[str, dict[str, int
 def _loadWritableMemberRowsByUsername(service, sheetId: str, header: Dict[str, str]) -> dict[str, int]:
     usernameCol = header["robloxUsername"]
     rankCol = header["rsRank"]
+    cacheKey = (str(sheetId), _sheetName(), str(usernameCol).upper(), str(rankCol).upper())
+    ttlSec = _rowLookupCacheTtlSec()
+    now = time.monotonic()
+    cached = _rowLookupCache.get(cacheKey)
+    if cached and ttlSec > 0 and (now - cached[0]) <= ttlSec:
+        return dict(cached[1])
+
     usernameAndRank = (
         service.spreadsheets()
         .values()
@@ -1526,7 +1587,9 @@ def _loadWritableMemberRowsByUsername(service, sheetId: str, header: Dict[str, s
         if not _isWritableMemberRow(usernameCell, rankCell):
             continue
         rowByUsername[_usernameLookupKey(usernameCell)] = idx
-    return rowByUsername
+    if ttlSec > 0:
+        _rowLookupCache[cacheKey] = (now, dict(rowByUsername))
+    return dict(rowByUsername)
 
 
 def listWritableRobloxUsernames() -> list[str]:
@@ -1644,25 +1707,26 @@ def _buildApprovedLogBatchData(
         entry = updatesByRow[row]
         currentRank = str(current.get("rsRank", "")).strip()
         isRmPlus = _isManagerRank(currentRank) or _isHighCommandRank(currentRank)
-        monthly = _toInt(current.get("monthly", "")) + max(0, int(entry.get("pointsDelta", 0)))
-        allTime = _toInt(current.get("allTime", "")) + max(0, int(entry.get("pointsDelta", 0)))
+        pointsDeltaValue = max(0, int(entry.get("pointsDelta", 0)))
+        monthly = _toInt(current.get("monthly", "")) + pointsDeltaValue
+        allTimeWriteValue = _buildAllTimeWriteValue(
+            current.get("allTime", ""),
+            current.get("allTimeFormula", ""),
+            pointsDeltaValue,
+        )
         patrolDeltaValue = max(0, int(entry.get("patrolDelta", 0)))
         hostedDeltaValue = max(0, int(entry.get("hostedPatrolDelta", 0)))
         effectivePatrolDelta = hostedDeltaValue if isRmPlus else patrolDeltaValue
         patrols = _toInt(current.get("patrols", "")) + effectivePatrolDelta
         currentQuotaStatus = str(current.get("quota", "")).strip()
-        promotedRank = _nextPromotionRank(currentRank, allTime)
-        rankForQuota = promotedRank or currentRank
-        quotaStatus = _computeQuotaStatus(rankForQuota, monthly, patrols, currentQuotaStatus)
+        quotaStatus = _computeQuotaStatus(currentRank, monthly, patrols, currentQuotaStatus)
 
         batchData.append({"range": _range(header["robloxUsername"], row), "values": [[entry["robloxUsername"]]]})
         batchData.append({"range": _range(header["monthly"], row), "values": [[monthly]]})
-        if not str(current.get("allTimeFormula", "")).strip().startswith("="):
-            batchData.append({"range": _range(header["allTime"], row), "values": [[allTime]]})
+        if allTimeWriteValue is not None:
+            batchData.append({"range": _range(header["allTime"], row), "values": [[allTimeWriteValue]]})
         batchData.append({"range": _range(header["patrols"], row), "values": [[patrols]]})
         batchData.append({"range": _range(header["quota"], row), "values": [[quotaStatus]]})
-        if promotedRank and _normalize(promotedRank) != _normalize(currentRank):
-            batchData.append({"range": _range(header["rsRank"], row), "values": [[promotedRank]]})
         touchedRows.append(row)
     return batchData, touchedRows
 
@@ -1808,7 +1872,11 @@ def touchupRecruitmentRows() -> dict:
     if deletedRows:
         usersAndBounds = _getMembersSectionBounds(service, header["robloxUsername"])
         if not usersAndBounds:
-            return {"rows": 0, "organized": 0, "deletedRows": deletedRows}
+            return {
+                "rows": 0,
+                "organized": 0,
+                "deletedRows": deletedRows,
+            }
     membersResult = _organizeAndFormatMembersSection(
         service,
         header,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging
+import json
 from typing import Any, Optional
 
 import discord
@@ -8,14 +8,11 @@ import discord
 import config
 from features.staff.bgItemReview import service
 from features.staff.bgflags import service as flagService
-from features.staff.sessions.Roblox import robloxInventory, robloxUsers
+from features.staff.sessions.Roblox import robloxAssets
 from runtime import interaction as interactionRuntime
 from runtime import orgProfiles
 from runtime import permissions as runtimePermissions
 from runtime import webhooks as runtimeWebhooks
-
-log = logging.getLogger(__name__)
-
 
 def _positiveInt(value: object) -> int:
     try:
@@ -171,6 +168,56 @@ def _truncate(value: object, *, limit: int = 60) -> str:
     return text[: max(0, int(limit) - 3)].rstrip() + "..."
 
 
+def _robloxCatalogUrl(assetId: object) -> str | None:
+    assetId = _positiveInt(assetId)
+    if assetId <= 0:
+        return None
+    return f"https://www.roblox.com/catalog/{assetId}"
+
+
+def _markdownLink(label: object, url: str | None, *, fallback: object = "") -> str:
+    cleanLabel = str(label or fallback or "Unknown item").strip() or str(fallback or "Unknown item").strip() or "Unknown item"
+    cleanLabel = cleanLabel.replace("[", "(").replace("]", ")")
+    if not url:
+        return cleanLabel
+    return f"[{cleanLabel}]({url})"
+
+
+def _parseQueueContext(queueRow: dict[str, Any]) -> dict[str, Any]:
+    raw = str(queueRow.get("contextJson") or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _contextJson(context: dict[str, Any] | None) -> str:
+    if not isinstance(context, dict) or not context:
+        return ""
+    return json.dumps(context, separators=(",", ":"), ensure_ascii=True)
+
+
+def _bgIntelDisputeContextSummary(context: dict[str, Any]) -> str | None:
+    normalizedType = str(context.get("kind") or "").strip().lower()
+    if normalizedType != "bg_intel_dispute":
+        return None
+    requestedByReviewerId = _positiveInt(context.get("requestedByReviewerId"))
+    reportId = _positiveInt(context.get("reportId"))
+    basis = str(context.get("flagBasis") or "").strip()
+    parts = ["BG intel dispute"]
+    if requestedByReviewerId > 0:
+        parts.append(f"requested by <@{requestedByReviewerId}>")
+    if reportId > 0:
+        parts.append(f"report #{reportId}")
+    summary = " | ".join(parts)
+    if basis:
+        summary += f"\nBasis: {basis}"
+    return summary
+
+
 def _queueRowSummaryLine(queueRow: dict[str, Any]) -> str:
     queueId = _positiveInt(queueRow.get("queueId"))
     assetId = _positiveInt(queueRow.get("assetId"))
@@ -216,7 +263,7 @@ async def buildQueueSummaryEmbed(*, guildId: int = 0) -> discord.Embed:
     flaggedText = "\n".join(_queueRowSummaryLine(row) for row in flaggedRows[:5]) or "No flagged items."
     embed.add_field(name="Recent Pending", value=pendingText[:1024], inline=False)
     embed.add_field(name="Recent Flagged", value=flaggedText[:1024], inline=False)
-    embed.set_footer(text="Use /bg-item-review to post a fresh queue summary.")
+    embed.set_footer(text="BG item review slash commands are disabled.")
     return embed
 
 
@@ -250,6 +297,7 @@ async def _buildQueueEmbed(queueRow: dict[str, Any]) -> discord.Embed:
     assetId = int(queueRow.get("assetId") or 0)
     status = service.normalizeStatus(queueRow.get("status"))
     sources = await service.listSourcesForQueue(queueId, limit=3)
+    context = _parseQueueContext(queueRow)
 
     embed = discord.Embed(
         title=str(queueRow.get("assetName") or f"Asset {assetId}").strip() or f"Asset {assetId}",
@@ -281,6 +329,45 @@ async def _buildQueueEmbed(queueRow: dict[str, Any]) -> discord.Embed:
     hashValue = str(queueRow.get("thumbnailHash") or "").strip()
     if hashValue:
         embed.add_field(name="Hash", value=f"`{hashValue}`", inline=True)
+
+    contextSummary = _bgIntelDisputeContextSummary(context)
+    if contextSummary:
+        embed.add_field(name="Queue Context", value=contextSummary[:1024], inline=False)
+
+    disputeItem = context.get("disputedItem") if isinstance(context.get("disputedItem"), dict) else {}
+    if disputeItem:
+        disputeName = str(disputeItem.get("name") or queueRow.get("assetName") or f"Asset {assetId}").strip() or f"Asset {assetId}"
+        disputeUrl = _robloxCatalogUrl(disputeItem.get("id") or assetId)
+        disputeBits = [_markdownLink(disputeName, disputeUrl, fallback=f"Asset {assetId}")]
+        creatorName = str(disputeItem.get("creatorName") or "").strip()
+        creatorId = _positiveInt(disputeItem.get("creatorId"))
+        if creatorName or creatorId > 0:
+            creatorLine = creatorName or "creator"
+            if creatorId > 0:
+                creatorLine += f" (`{creatorId}`)"
+            disputeBits.append(f"Creator: {creatorLine}")
+        itemType = str(disputeItem.get("itemType") or "").strip()
+        if itemType:
+            disputeBits.append(f"Type: `{itemType}`")
+        embed.add_field(name="Disputed Item", value="\n".join(disputeBits)[:1024], inline=False)
+
+    flagBasis = str(context.get("flagBasis") or "").strip()
+    if flagBasis:
+        embed.add_field(name="Flag Basis", value=flagBasis[:1024], inline=False)
+
+    referenceItem = context.get("referenceItem") if isinstance(context.get("referenceItem"), dict) else {}
+    if referenceItem:
+        referenceId = _positiveInt(referenceItem.get("id"))
+        referenceName = str(referenceItem.get("name") or f"Asset {referenceId}").strip() or f"Asset {referenceId}"
+        referenceUrl = _robloxCatalogUrl(referenceId)
+        referenceBits = [_markdownLink(referenceName, referenceUrl, fallback=f"Asset {referenceId}")]
+        referenceReason = str(referenceItem.get("reason") or "").strip()
+        if referenceReason:
+            referenceBits.append(referenceReason)
+        embed.add_field(name="Matched Against", value="\n".join(referenceBits)[:1024], inline=False)
+        referenceThumbnailUrl = str(referenceItem.get("thumbnailUrl") or "").strip()
+        if referenceThumbnailUrl:
+            embed.set_thumbnail(url=referenceThumbnailUrl)
 
     lastSourceUserId = _positiveInt(queueRow.get("sourceUserId"))
     lastSourceRoblox = str(queueRow.get("sourceRobloxUsername") or "").strip()
@@ -345,6 +432,7 @@ class BgItemReviewView(discord.ui.View):
     async def _applyDecision(self, interaction: discord.Interaction, newStatus: str) -> None:
         if not await self._guard(interaction):
             return
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
         queueRow = await service.getQueueEntry(self.queueId)
         if not queueRow:
             await interactionRuntime.safeInteractionReply(
@@ -362,13 +450,19 @@ class BgItemReviewView(discord.ui.View):
                 ephemeral=True,
             )
             return
-
-        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
-        await service.updateQueueStatus(
+        updated = await service.updateQueueStatus(
             self.queueId,
             status=newStatus,
             reviewerId=int(interaction.user.id),
         )
+        if not updated:
+            await refreshQueueMessage(interaction.client, self.queueId, message=interaction.message)
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="This item was already reviewed by another action.",
+                ephemeral=True,
+            )
+            return
         await service.addAction(
             self.queueId,
             actorId=int(interaction.user.id),
@@ -385,24 +479,6 @@ class BgItemReviewView(discord.ui.View):
     async def flagBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self._guard(interaction):
             return
-        queueRow = await service.getQueueEntry(self.queueId)
-        if not queueRow:
-            await interactionRuntime.safeInteractionReply(
-                interaction,
-                content="This item review entry no longer exists.",
-                ephemeral=True,
-            )
-            return
-
-        currentStatus = service.normalizeStatus(queueRow.get("status"))
-        if currentStatus in service.FINAL_STATUSES:
-            await interactionRuntime.safeInteractionReply(
-                interaction,
-                content=f"This item has already been marked as {_statusLabel(currentStatus).lower()}.",
-                ephemeral=True,
-            )
-            return
-
         await interactionRuntime.safeInteractionSendModal(
             interaction,
             BgItemReviewFlagModal(self.queueId),
@@ -436,6 +512,7 @@ class BgItemReviewFlagModal(discord.ui.Modal, title="Flag Item Review Entry"):
             )
             return
 
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
         queueRow = await service.getQueueEntry(self.queueId)
         if not queueRow:
             await interactionRuntime.safeInteractionReply(
@@ -455,13 +532,20 @@ class BgItemReviewFlagModal(discord.ui.Modal, title="Flag Item Review Entry"):
             return
 
         noteText = str(self.note).strip()
-        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
-        await service.updateQueueStatus(
+        updated = await service.updateQueueStatus(
             self.queueId,
             status=service.STATUS_FLAGGED,
             reviewerId=int(interaction.user.id),
             note=noteText,
         )
+        if not updated:
+            await refreshQueueMessage(interaction.client, self.queueId)
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="This item was already reviewed by another action.",
+                ephemeral=True,
+            )
+            return
         await service.addAction(
             self.queueId,
             actorId=int(interaction.user.id),
@@ -554,19 +638,242 @@ async def _postQueueMessage(
 
 
 async def restorePersistentViews(botClient: discord.Client) -> int:
-    rows = await service.listOpenQueueEntries()
-    restored = 0
-    for row in rows:
-        messageId = _positiveInt(row.get("reviewMessageId"))
-        if messageId <= 0:
-            continue
-        botClient.add_view(_viewForRow(row), message_id=messageId)
-        try:
-            await refreshQueueMessage(botClient, int(row.get("queueId") or 0))
-        except Exception:
-            log.exception("Failed to refresh BG item review queue message %s during restore.", messageId)
-        restored += 1
-    return restored
+    return 0
+
+
+async def _resolveAssetReviewDetails(
+    assetId: int,
+    *,
+    fallbackName: str | None = None,
+    fallbackCreatorId: int | None = None,
+    fallbackCreatorName: str | None = None,
+    fallbackItemType: str | None = None,
+) -> dict[str, Any]:
+    normalizedAssetId = _positiveInt(assetId)
+    if normalizedAssetId <= 0:
+        return {}
+    priceRows, _ = await robloxAssets.fetchCatalogAssetPrices([normalizedAssetId])
+    validationRows = await robloxAssets.validateRobloxAssetVisualReferences([normalizedAssetId])
+    priceInfo = dict((priceRows or {}).get(normalizedAssetId) or {})
+    validation = {}
+    for row in list(validationRows or []):
+        if _positiveInt(getattr(row, "get", lambda *_: 0)("assetId")) == normalizedAssetId:
+            validation = dict(row)
+            break
+    return {
+        "id": normalizedAssetId,
+        "name": str(priceInfo.get("name") or fallbackName or f"Asset {normalizedAssetId}").strip() or f"Asset {normalizedAssetId}",
+        "itemType": str(priceInfo.get("assetTypeName") or fallbackItemType or "").strip() or None,
+        "creatorId": _positiveInt(priceInfo.get("creatorId")) or _positiveInt(fallbackCreatorId) or None,
+        "creatorName": str(priceInfo.get("creatorName") or fallbackCreatorName or "").strip() or None,
+        "priceRobux": priceInfo.get("price"),
+        "thumbnailHash": str(validation.get("thumbnailHash") or "").strip(),
+        "thumbnailUrl": str(validation.get("thumbnailUrl") or "").strip() or None,
+        "thumbnailState": str(validation.get("thumbnailState") or "").strip() or None,
+        "validationState": str(validation.get("validationState") or "").strip().upper() or "UNKNOWN",
+    }
+
+
+def _bgIntelFlagBasis(flaggedItem: dict[str, Any]) -> str:
+    matchType = str(flaggedItem.get("matchType") or "").strip().lower()
+    matchMode = str(flaggedItem.get("matchMode") or "").strip().lower()
+    keyword = str(flaggedItem.get("keyword") or "").strip()
+    referenceItemId = _positiveInt(flaggedItem.get("referenceItemId"))
+    if matchType == "visual":
+        if referenceItemId > 0:
+            return f"Thumbnail similarity to previously flagged item `{referenceItemId}`."
+        return "Thumbnail similarity to a previously flagged item."
+    if matchType == "keyword":
+        if keyword:
+            if matchMode == "fuzzy":
+                score = flaggedItem.get("fuzzyScore")
+                try:
+                    fuzzyScore = f"{float(score):.0f}"
+                except (TypeError, ValueError):
+                    fuzzyScore = "?"
+                return f"Item name looked similar to keyword `{keyword}` ({fuzzyScore})."
+            if matchMode == "normalized":
+                return f"Item name normalized to match keyword `{keyword}`."
+            return f"Item name matched keyword `{keyword}`."
+        return "Item name matched a configured keyword."
+    if matchType == "item":
+        return "Exact item ID matched a configured flagged item."
+    if matchType == "creator":
+        return "Item creator matched a configured flagged creator."
+    reason = str(flaggedItem.get("reason") or "").strip()
+    return reason or "Flagged during BG intelligence inventory review."
+
+
+async def _buildBgIntelDisputeContext(
+    *,
+    flaggedItem: dict[str, Any],
+    reportId: int,
+    reviewerId: int,
+) -> dict[str, Any]:
+    assetId = _positiveInt(flaggedItem.get("id"))
+    details = await _resolveAssetReviewDetails(
+        assetId,
+        fallbackName=str(flaggedItem.get("name") or "").strip() or None,
+        fallbackCreatorId=_positiveInt(flaggedItem.get("creatorId")) or None,
+        fallbackCreatorName=str(flaggedItem.get("creatorName") or "").strip() or None,
+        fallbackItemType=str(flaggedItem.get("itemType") or "").strip() or None,
+    )
+    matchType = str(flaggedItem.get("matchType") or "").strip().lower()
+    referenceItem: dict[str, Any] | None = None
+    referenceItemId = _positiveInt(flaggedItem.get("referenceItemId"))
+    if matchType == "visual" and referenceItemId > 0:
+        referenceDetails = await _resolveAssetReviewDetails(referenceItemId)
+        if referenceDetails:
+            referenceItem = {
+                "id": int(referenceDetails.get("id") or 0),
+                "name": referenceDetails.get("name"),
+                "thumbnailUrl": referenceDetails.get("thumbnailUrl"),
+                "reason": "Flagged source item used for thumbnail similarity matching.",
+            }
+    elif matchType == "item" and assetId > 0:
+        referenceItem = {
+            "id": assetId,
+            "name": details.get("name") or flaggedItem.get("name") or f"Asset {assetId}",
+            "thumbnailUrl": details.get("thumbnailUrl"),
+            "reason": "Configured flagged item rule matched this exact asset.",
+        }
+    context: dict[str, Any] = {
+        "kind": "bg_intel_dispute",
+        "reportId": int(reportId or 0),
+        "requestedByReviewerId": int(reviewerId or 0),
+        "flagBasis": _bgIntelFlagBasis(flaggedItem),
+        "disputedItem": {
+            "id": int(details.get("id") or assetId),
+            "name": details.get("name") or flaggedItem.get("name") or f"Asset {assetId}",
+            "creatorId": details.get("creatorId") or _positiveInt(flaggedItem.get("creatorId")) or None,
+            "creatorName": details.get("creatorName") or flaggedItem.get("creatorName"),
+            "itemType": details.get("itemType") or flaggedItem.get("itemType"),
+        },
+    }
+    if referenceItem:
+        context["referenceItem"] = referenceItem
+    return {
+        "context": context,
+        "details": details,
+    }
+
+
+async def queueBgIntelDisputedItem(
+    botClient: discord.Client,
+    *,
+    guildId: int,
+    reviewerId: int,
+    report: Any,
+    flaggedItem: dict[str, Any],
+    reportId: int = 0,
+) -> dict[str, Any]:
+    normalizedGuildId = _positiveInt(guildId)
+    if normalizedGuildId <= 0:
+        return {"ok": False, "reason": "Missing guild."}
+    if not _queueEnabled(normalizedGuildId):
+        return {"ok": False, "reason": "Queue disabled."}
+    if _queueChannelId(normalizedGuildId) <= 0:
+        return {"ok": False, "reason": "No queue channel configured."}
+
+    assetId = _positiveInt(flaggedItem.get("id"))
+    if assetId <= 0:
+        return {"ok": False, "reason": "Flagged item is missing an asset ID."}
+
+    sourceUserId = _positiveInt(getattr(report, "discordUserId", 0))
+    sourceRobloxUserId = _positiveInt(getattr(report, "robloxUserId", 0))
+    sourceRobloxUsername = str(getattr(report, "robloxUsername", "") or "").strip() or None
+
+    contextInfo = await _buildBgIntelDisputeContext(
+        flaggedItem=flaggedItem,
+        reportId=int(reportId or 0),
+        reviewerId=int(reviewerId or 0),
+    )
+    context = dict(contextInfo.get("context") or {})
+    details = dict(contextInfo.get("details") or {})
+    contextJson = _contextJson(context)
+    thumbnailHash = str(details.get("thumbnailHash") or "").strip()
+
+    existing = await service.findCandidateMatch(assetId, thumbnailHash, guildId=normalizedGuildId)
+    if existing is not None:
+        queueId = int(existing.get("queueId") or 0)
+        await service.touchQueueEntry(
+            queueId,
+            guildId=normalizedGuildId,
+            sessionId=0,
+            sourceUserId=sourceUserId,
+            sourceRobloxUserId=sourceRobloxUserId or None,
+            sourceRobloxUsername=sourceRobloxUsername,
+            queuedByReviewerId=int(reviewerId or 0),
+            contextJson=contextJson,
+        )
+        await service.addSourceRecord(
+            queueId=queueId,
+            guildId=normalizedGuildId,
+            sessionId=0,
+            sourceUserId=sourceUserId,
+            sourceRobloxUserId=sourceRobloxUserId or None,
+            sourceRobloxUsername=sourceRobloxUsername,
+            queuedByReviewerId=int(reviewerId or 0),
+        )
+        if service.normalizeStatus(existing.get("status")) in service.FINAL_STATUSES:
+            await service.reopenQueueEntry(
+                queueId,
+                reviewerId=int(reviewerId or 0),
+                contextJson=contextJson,
+            )
+        else:
+            await service.setQueueContext(queueId, contextJson=contextJson)
+        await service.addAction(
+            queueId,
+            actorId=int(reviewerId or 0),
+            action="DISPUTED",
+            note=str(context.get("flagBasis") or "").strip() or None,
+        )
+        refreshed = await refreshQueueMessage(botClient, queueId)
+        if not refreshed:
+            queueRow = await service.getQueueEntry(queueId)
+            if queueRow is not None and _positiveInt(queueRow.get("reviewMessageId")) <= 0:
+                refreshed = await _postQueueMessage(botClient, queueRow)
+        return {"ok": bool(refreshed), "queueId": queueId, "created": False, "reason": "" if refreshed else "Unable to post queue message."}
+
+    queueId = await service.createQueueEntry(
+        guildId=normalizedGuildId,
+        sessionId=0,
+        assetId=assetId,
+        assetName=str(details.get("name") or flaggedItem.get("name") or f"Asset {assetId}").strip() or f"Asset {assetId}",
+        itemType=str(details.get("itemType") or flaggedItem.get("itemType") or "").strip() or None,
+        creatorId=_positiveInt(details.get("creatorId")) or _positiveInt(flaggedItem.get("creatorId")) or None,
+        creatorName=str(details.get("creatorName") or flaggedItem.get("creatorName") or "").strip() or None,
+        priceRobux=details.get("priceRobux"),
+        thumbnailHash=thumbnailHash,
+        thumbnailUrl=str(details.get("thumbnailUrl") or "").strip() or None,
+        thumbnailState=str(details.get("thumbnailState") or "").strip() or None,
+        sourceUserId=sourceUserId,
+        sourceRobloxUserId=sourceRobloxUserId or None,
+        sourceRobloxUsername=sourceRobloxUsername,
+        queuedByReviewerId=int(reviewerId or 0),
+        contextJson=contextJson,
+    )
+    await service.addSourceRecord(
+        queueId=queueId,
+        guildId=normalizedGuildId,
+        sessionId=0,
+        sourceUserId=sourceUserId,
+        sourceRobloxUserId=sourceRobloxUserId or None,
+        sourceRobloxUsername=sourceRobloxUsername,
+        queuedByReviewerId=int(reviewerId or 0),
+    )
+    await service.addAction(
+        queueId,
+        actorId=int(reviewerId or 0),
+        action="DISPUTED",
+        note=str(context.get("flagBasis") or "").strip() or None,
+    )
+    queueRow = await service.getQueueEntry(queueId)
+    if queueRow is None:
+        return {"ok": False, "queueId": queueId, "created": True, "reason": "Queue row disappeared after creation."}
+    posted = await _postQueueMessage(botClient, queueRow)
+    return {"ok": bool(posted), "queueId": queueId, "created": True, "reason": "" if posted else "Unable to post queue message."}
 
 
 async def queueRejectedAttendeeInventory(
@@ -577,166 +884,11 @@ async def queueRejectedAttendeeInventory(
     reviewerId: int,
     guild: discord.Guild | None = None,
 ) -> dict[str, int | str]:
-    if not isinstance(attendee, dict):
-        return {"created": 0, "existing": 0, "known": 0, "errors": 1, "reason": "Missing attendee."}
-
-    sessionRow = dict(session or {})
-    guildId = _positiveInt(sessionRow.get("guildId") or getattr(guild, "id", 0))
-    if not _queueEnabled(guildId):
-        return {"created": 0, "existing": 0, "known": 0, "errors": 0, "reason": "Queue disabled."}
-    if _queueChannelId(guildId) <= 0:
-        return {"created": 0, "existing": 0, "known": 0, "errors": 1, "reason": "No queue channel configured."}
-
-    sourceUserId = _positiveInt(attendee.get("userId"))
-    sourceRobloxUserId = _positiveInt(attendee.get("robloxUserId"))
-    sourceRobloxUsername = str(attendee.get("robloxUsername") or "").strip() or None
-    if sourceRobloxUserId <= 0 and sourceUserId > 0:
-        lookup = await robloxUsers.fetchRobloxUser(sourceUserId, guildId=guildId or None)
-        sourceRobloxUserId = _positiveInt(lookup.robloxId)
-        sourceRobloxUsername = str(lookup.robloxUsername or sourceRobloxUsername or "").strip() or None
-    if sourceRobloxUserId <= 0 and sourceRobloxUsername:
-        lookup = await robloxUsers.fetchRobloxUserByUsername(sourceRobloxUsername)
-        sourceRobloxUserId = _positiveInt(lookup.robloxId)
-        sourceRobloxUsername = str(lookup.robloxUsername or sourceRobloxUsername or "").strip() or None
-    if sourceUserId > 0 and sourceRobloxUsername:
-        await robloxUsers.rememberKnownRobloxIdentity(
-            sourceUserId,
-            sourceRobloxUsername,
-            robloxId=sourceRobloxUserId if sourceRobloxUserId > 0 else None,
-            source="bg-item-review",
-            guildId=guildId or None,
-            confidence=90 if sourceRobloxUserId > 0 else 70,
-        )
-    if sourceRobloxUserId <= 0:
-        return {"created": 0, "existing": 0, "known": 0, "errors": 1, "reason": "No Roblox identity."}
-
-    reviewItemsResult = await robloxInventory.fetchRobloxInventoryReviewItems(
-        int(sourceRobloxUserId),
-        maxPagesPerType=_maxPagesPerType(guildId),
-        candidateLimit=_candidateLimit(guildId),
-    )
-    if reviewItemsResult.error:
-        return {
-            "created": 0,
-            "existing": 0,
-            "known": 0,
-            "errors": 1,
-            "reason": str(reviewItemsResult.error),
-        }
-
-    knownFlagHashes = await flagService.getValidatedItemVisualHashes(ensureSynced=True)
-    knownAssetIds = {int(assetId) for assetId in knownFlagHashes.keys()}
-    knownHashes = {str(hashValue).strip() for hashValue in knownFlagHashes.values() if str(hashValue).strip()}
-
-    createdCount = 0
-    existingCount = 0
-    knownCount = 0
-    errorCount = 0
-    sessionId = _positiveInt(sessionRow.get("sessionId"))
-
-    for item in list(reviewItemsResult.items or []):
-        if not isinstance(item, dict):
-            continue
-        assetId = _positiveInt(item.get("id"))
-        thumbnailHash = str(item.get("thumbnailHash") or "").strip()
-        validationState = str(item.get("validationState") or "").strip().upper()
-        if assetId <= 0 or not thumbnailHash or validationState != "VALID":
-            continue
-        if assetId in knownAssetIds or thumbnailHash in knownHashes:
-            knownCount += 1
-            continue
-
-        existing = await service.findCandidateMatch(assetId, thumbnailHash)
-        if existing is not None:
-            await service.touchQueueEntry(
-                int(existing.get("queueId") or 0),
-                guildId=guildId,
-                sessionId=sessionId,
-                sourceUserId=sourceUserId,
-                sourceRobloxUserId=sourceRobloxUserId,
-                sourceRobloxUsername=sourceRobloxUsername,
-                queuedByReviewerId=int(reviewerId or 0),
-            )
-            await service.addSourceRecord(
-                queueId=int(existing.get("queueId") or 0),
-                guildId=guildId,
-                sessionId=sessionId,
-                sourceUserId=sourceUserId,
-                sourceRobloxUserId=sourceRobloxUserId,
-                sourceRobloxUsername=sourceRobloxUsername,
-                queuedByReviewerId=int(reviewerId or 0),
-            )
-            await service.addAction(
-                int(existing.get("queueId") or 0),
-                actorId=int(reviewerId or 0),
-                action="SEEN_AGAIN",
-            )
-            if service.normalizeStatus(existing.get("status")) in service.OPEN_STATUSES:
-                refreshed = await refreshQueueMessage(botClient, int(existing.get("queueId") or 0))
-                if not refreshed and _positiveInt(existing.get("reviewMessageId")) <= 0:
-                    refreshed = await _postQueueMessage(
-                        botClient,
-                        await service.getQueueEntry(int(existing.get("queueId") or 0)) or existing,
-                    )
-                if not refreshed and _positiveInt(existing.get("reviewMessageId")) <= 0:
-                    errorCount += 1
-            existingCount += 1
-            continue
-
-        try:
-            queueId = await service.createQueueEntry(
-                guildId=guildId,
-                sessionId=sessionId,
-                assetId=assetId,
-                assetName=str(item.get("name") or "").strip() or None,
-                itemType=str(item.get("itemType") or "").strip() or None,
-                creatorId=_positiveInt(item.get("creatorId")) or None,
-                creatorName=str(item.get("creatorName") or "").strip() or None,
-                priceRobux=item.get("price"),
-                thumbnailHash=thumbnailHash,
-                thumbnailUrl=str(item.get("thumbnailUrl") or "").strip() or None,
-                thumbnailState=str(item.get("thumbnailState") or "").strip() or None,
-                sourceUserId=sourceUserId,
-                sourceRobloxUserId=sourceRobloxUserId or None,
-                sourceRobloxUsername=sourceRobloxUsername,
-                queuedByReviewerId=int(reviewerId or 0),
-            )
-        except Exception:
-            existing = await service.findCandidateMatch(assetId, thumbnailHash)
-            if existing is None:
-                log.exception("Failed to create BG item review queue row for asset %s.", assetId)
-                errorCount += 1
-                continue
-            queueId = int(existing.get("queueId") or 0)
-
-        await service.addSourceRecord(
-            queueId=queueId,
-            guildId=guildId,
-            sessionId=sessionId,
-            sourceUserId=sourceUserId,
-            sourceRobloxUserId=sourceRobloxUserId or None,
-            sourceRobloxUsername=sourceRobloxUsername,
-            queuedByReviewerId=int(reviewerId or 0),
-        )
-        await service.addAction(
-            queueId,
-            actorId=int(reviewerId or 0),
-            action="QUEUED",
-        )
-        queueRow = await service.getQueueEntry(queueId)
-        if queueRow is None:
-            errorCount += 1
-            continue
-        if not await _postQueueMessage(botClient, queueRow):
-            errorCount += 1
-            continue
-        createdCount += 1
-
     return {
-        "created": createdCount,
-        "existing": existingCount,
-        "known": knownCount,
-        "errors": errorCount,
-        "reason": "",
+        "created": 0,
+        "existing": 0,
+        "known": 0,
+        "errors": 0,
+        "reason": "Denied-row inventory item review was removed.",
     }
 

@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any, Awaitable, Callable, Optional
 
 import discord
@@ -34,6 +35,7 @@ from features.staff.sessions.bgBuckets import adultBgReviewBucket, normalizeBgRe
 from runtime import taskBudgeter
 
 ProgressCallback = Callable[[str], Awaitable[Any]]
+DebugTimingRecorder = Callable[[str, float], Any]
 log = logging.getLogger(__name__)
 
 
@@ -154,6 +156,7 @@ class BgIntelligenceReport:
     externalSourceDetails: list[dict[str, Any]] | None = None
     priorReportSummary: dict[str, Any] | None = None
     privateInventoryDmSent: Optional[bool] = None
+    debugTimingSummary: dict[str, Any] | None = None
 
 
 def _normalizeIntSet(values: Any) -> set[int]:
@@ -602,6 +605,17 @@ def _hasDatedBadges(badges: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _allBadgesHaveAwardDates(badges: list[dict[str, Any]]) -> bool:
+    sawBadge = False
+    for badge in list(badges or []):
+        if not isinstance(badge, dict):
+            continue
+        sawBadge = True
+        if _parseRobloxDate(badge.get("awardedDate")) is None:
+            return False
+    return sawBadge
+
+
 def _buildBadgeTimelineSummary(
     badges: list[dict[str, Any]],
     *,
@@ -880,6 +894,13 @@ def _knownMemberLabel(row: dict[str, Any]) -> str:
         str(row.get("sectionLabel") or "").strip(),
     ]
     return " / ".join(piece for piece in pieces if piece)
+
+
+def _altProgressStatus(detail: str) -> str:
+    cleanDetail = str(detail or "").strip()
+    if not cleanDetail:
+        return "Correlating known-member alt evidence..."
+    return f"Correlating known-member alt evidence [{cleanDetail}]..."
 
 
 async def _loadKnownMemberAltCandidates(*, limit: int) -> list[dict[str, Any]]:
@@ -1219,6 +1240,10 @@ def _nameSimilarityReason(
     fuzzyMinSimilarity: float,
     fuzzyMinLength: int,
 ) -> tuple[str | None, str, float | None]:
+    candidateLiteral = str(candidateUsername or "").strip().lower()
+    knownLiteral = str(knownUsername or "").strip().lower()
+    if candidateLiteral and knownLiteral and candidateLiteral == knownLiteral:
+        return None, "weak", None
     candidateKey = characters.normalized_username_key(candidateUsername)
     knownKey = characters.normalized_username_key(knownUsername)
     if not candidateKey or not knownKey:
@@ -1606,6 +1631,8 @@ async def _detectKnownMemberAltMatches(
     *,
     guildId: int = 0,
     configModule: Any = config,
+    progressCallback: ProgressCallback | None = None,
+    debugTimingRecorder: DebugTimingRecorder | None = None,
 ) -> None:
     report.altMatches = []
     if not bool(getattr(configModule, "bgIntelligenceKnownMemberAltDetectionEnabled", True)):
@@ -1621,41 +1648,106 @@ async def _detectKnownMemberAltMatches(
         matchLimit,
         _positiveConfigInt(getattr(configModule, "bgIntelligenceKnownMemberAltCandidateLimit", 5000), 5000),
     )
-    knownRows = await _loadKnownMemberAltCandidates(limit=candidateLimit)
+    knownRows = await _runTimedStep(
+        _altProgressStatus("loading known-member candidate pool"),
+        lambda: _loadKnownMemberAltCandidates(limit=candidateLimit),
+        debugTimingRecorder=debugTimingRecorder,
+    )
     matches: list[dict[str, Any]] = []
     seenMatches: set[tuple[str, str, str, int, int]] = set()
-    altLinkRows = await _loadAltLinkRows(report, guildId=int(guildId or 0))
+    altLinkRows = await _runTimedStep(
+        _altProgressStatus("loading stored staff alt links"),
+        lambda: _loadAltLinkRows(report, guildId=int(guildId or 0)),
+        debugTimingRecorder=debugTimingRecorder,
+    )
     clearedPairs = _clearedAltEndpoints(report, altLinkRows)
 
-    _addAltLinkEvidence(report, rows=altLinkRows, matches=matches, seen=seenMatches, limit=matchLimit)
-    await _addIdentityReuseEvidence(report, knownRows=knownRows, matches=matches, seen=seenMatches, limit=matchLimit)
-    _addNameVariantEvidence(
-        report,
-        knownRows=knownRows,
-        clearedPairs=clearedPairs,
-        matches=matches,
-        seen=seenMatches,
-        limit=matchLimit,
-        configModule=configModule,
+    await _runTimedStep(
+        _altProgressStatus("applying stored alt links"),
+        lambda: asyncio.to_thread(
+            lambda: _addAltLinkEvidence(
+                report,
+                rows=altLinkRows,
+                matches=matches,
+                seen=seenMatches,
+                limit=matchLimit,
+            )
+        ),
+        debugTimingRecorder=debugTimingRecorder,
     )
-    await _addPreviousUsernameIndexEvidence(
-        report,
-        knownRows=knownRows,
-        matches=matches,
-        seen=seenMatches,
-        limit=matchLimit,
+    await _runTimedStep(
+        _altProgressStatus("checking identity reuse"),
+        lambda: _addIdentityReuseEvidence(report, knownRows=knownRows, matches=matches, seen=seenMatches, limit=matchLimit),
+        debugTimingRecorder=debugTimingRecorder,
     )
-    _addFriendOverlapEvidence(report, knownRows=knownRows, matches=matches, seen=seenMatches, limit=matchLimit)
-    await _addGroupOverlapEvidence(
-        report,
-        knownRows=knownRows,
-        matches=matches,
-        seen=seenMatches,
-        limit=matchLimit,
-        configModule=configModule,
+    await _runTimedStep(
+        _altProgressStatus("checking username variants"),
+        lambda: asyncio.to_thread(
+            lambda: _addNameVariantEvidence(
+                report,
+                knownRows=knownRows,
+                clearedPairs=clearedPairs,
+                matches=matches,
+                seen=seenMatches,
+                limit=matchLimit,
+                configModule=configModule,
+            )
+        ),
+        debugTimingRecorder=debugTimingRecorder,
     )
-    await _addRejectionEvasionEvidence(matches=matches, seen=seenMatches, limit=matchLimit)
-    _addNewAccountClusterEvidence(report, matches=matches, seen=seenMatches, limit=matchLimit)
+    await _runTimedStep(
+        _altProgressStatus("checking historical username index"),
+        lambda: _addPreviousUsernameIndexEvidence(
+            report,
+            knownRows=knownRows,
+            matches=matches,
+            seen=seenMatches,
+            limit=matchLimit,
+        ),
+        debugTimingRecorder=debugTimingRecorder,
+    )
+    await _runTimedStep(
+        _altProgressStatus("checking friend overlap"),
+        lambda: asyncio.to_thread(
+            lambda: _addFriendOverlapEvidence(
+                report,
+                knownRows=knownRows,
+                matches=matches,
+                seen=seenMatches,
+                limit=matchLimit,
+            )
+        ),
+        debugTimingRecorder=debugTimingRecorder,
+    )
+    await _runTimedStep(
+        _altProgressStatus("checking shared group overlap"),
+        lambda: _addGroupOverlapEvidence(
+            report,
+            knownRows=knownRows,
+            matches=matches,
+            seen=seenMatches,
+            limit=matchLimit,
+            configModule=configModule,
+        ),
+        debugTimingRecorder=debugTimingRecorder,
+    )
+    await _runTimedStep(
+        _altProgressStatus("checking rejection history"),
+        lambda: _addRejectionEvasionEvidence(matches=matches, seen=seenMatches, limit=matchLimit),
+        debugTimingRecorder=debugTimingRecorder,
+    )
+    await _runTimedStep(
+        _altProgressStatus("checking new-account clustering"),
+        lambda: asyncio.to_thread(
+            lambda: _addNewAccountClusterEvidence(
+                report,
+                matches=matches,
+                seen=seenMatches,
+                limit=matchLimit,
+            )
+        ),
+        debugTimingRecorder=debugTimingRecorder,
+    )
 
     report.altScanStatus = "OK"
     report.altMatches = matches
@@ -1666,9 +1758,17 @@ async def _safeDetectKnownMemberAltMatches(
     *,
     guildId: int = 0,
     configModule: Any = config,
+    progressCallback: ProgressCallback | None = None,
+    debugTimingRecorder: DebugTimingRecorder | None = None,
 ) -> None:
     try:
-        await _detectKnownMemberAltMatches(report, guildId=int(guildId or 0), configModule=configModule)
+        await _detectKnownMemberAltMatches(
+            report,
+            guildId=int(guildId or 0),
+            configModule=configModule,
+            progressCallback=progressCallback,
+            debugTimingRecorder=debugTimingRecorder,
+        )
     except Exception as exc:
         log.exception("BG intelligence known-member alt scan failed unexpectedly.")
         report.altScanStatus = "ERROR"
@@ -1835,6 +1935,28 @@ async def _emitProgress(progressCallback: ProgressCallback | None, status: str) 
         log.debug("BG intelligence progress update failed.", exc_info=True)
 
 
+def _recordDebugTiming(debugTimingRecorder: DebugTimingRecorder | None, label: str, seconds: float) -> None:
+    if debugTimingRecorder is None:
+        return
+    try:
+        debugTimingRecorder(label, seconds)
+    except Exception:
+        log.debug("BG intelligence debug timing record failed.", exc_info=True)
+
+
+async def _runTimedStep(
+    label: str,
+    stepFactory: Callable[[], Awaitable[Any]],
+    *,
+    debugTimingRecorder: DebugTimingRecorder | None = None,
+) -> Any:
+    startedAt = perf_counter()
+    try:
+        return await stepFactory()
+    finally:
+        _recordDebugTiming(debugTimingRecorder, label, perf_counter() - startedAt)
+
+
 def _unexpectedScanError(label: str, exc: Exception) -> str:
     text = str(exc).strip()
     prefix = f"{label} failed unexpectedly"
@@ -1883,6 +2005,7 @@ async def _completeReportScan(
     reviewer: discord.User | discord.Member | None = None,
     configModule: Any = config,
     progressCallback: ProgressCallback | None = None,
+    debugTimingRecorder: DebugTimingRecorder | None = None,
 ) -> BgIntelligenceReport:
     if not report.robloxUserId:
         await _emitProgress(progressCallback, "No Roblox account found; checking external safety records only...")
@@ -1897,8 +2020,13 @@ async def _completeReportScan(
         report.badgeScanStatus = "NO_ROVER"
         await _safeScanExternalSources(report, configModule=configModule)
         if report.robloxUsername:
-            await _emitProgress(progressCallback, "Checking known-member username variants...")
-            await _safeDetectKnownMemberAltMatches(report, guildId=int(guildId), configModule=configModule)
+            await _safeDetectKnownMemberAltMatches(
+                report,
+                guildId=int(guildId),
+                configModule=configModule,
+                progressCallback=progressCallback,
+                debugTimingRecorder=debugTimingRecorder,
+            )
         try:
             report.priorReportSummary = await _loadPriorReportSummary(
                 guildId=int(guildId),
@@ -1932,8 +2060,15 @@ async def _completeReportScan(
         log.exception("BG intelligence profile lookup failed unexpectedly.")
         if not report.roverError:
             report.roverError = _unexpectedScanError("Roblox profile lookup", exc)
-    if bool(getattr(configModule, "bgIntelligenceFetchUsernameHistoryEnabled", True)):
-        await _emitProgress(progressCallback, "Checking Roblox username history...")
+    isAdultRoute = report.reviewBucket == adultBgReviewBucket
+    inventoryEnabled = bool(getattr(configModule, "robloxInventoryScanEnabled", True)) and bool(
+        getattr(configModule, "bgIntelligenceFetchInventoryEnabled", True)
+    )
+    outfitEnabled = bool(getattr(configModule, "robloxOutfitScanEnabled", True)) and bool(
+        getattr(configModule, "bgIntelligenceFetchOutfitsEnabled", True)
+    )
+
+    async def _scanUsernameHistoryStep() -> None:
         try:
             usernameHistory = await robloxProfiles.fetchRobloxUsernameHistory(
                 int(report.robloxUserId),
@@ -1949,13 +2084,8 @@ async def _completeReportScan(
             log.exception("BG intelligence username history scan failed unexpectedly.")
             report.usernameHistoryScanStatus = "ERROR"
             report.usernameHistoryScanError = _unexpectedScanError("Username history scan", exc)
-    else:
-        report.usernameHistoryScanStatus = "SKIPPED"
-    report.directMatches = _directMatchesForReport(report, rules)
-    await externalTask
 
-    if bool(getattr(configModule, "bgIntelligenceFetchConnectionsEnabled", True)):
-        await _emitProgress(progressCallback, "Checking Roblox connection counts...")
+    async def _scanConnectionCountsStep() -> None:
         try:
             connectionResult = await robloxProfiles.fetchRobloxConnectionCounts(int(report.robloxUserId))
             report.connectionSummary = {
@@ -1976,11 +2106,8 @@ async def _completeReportScan(
             log.exception("BG intelligence connection scan failed unexpectedly.")
             report.connectionScanStatus = "ERROR"
             report.connectionScanError = _unexpectedScanError("Connection scan", exc)
-    else:
-        report.connectionScanStatus = "SKIPPED"
 
-    if bool(getattr(configModule, "bgIntelligenceFetchFriendIdsEnabled", True)):
-        await _emitProgress(progressCallback, "Sampling Roblox friends for known-member overlap...")
+    async def _scanFriendIdsStep() -> None:
         try:
             friendResult = await robloxProfiles.fetchRobloxFriendIds(
                 int(report.robloxUserId),
@@ -1998,12 +2125,8 @@ async def _completeReportScan(
             report.friendIdsScanStatus = "ERROR"
             report.friendIdsScanError = _unexpectedScanError("Friend-ID scan", exc)
             report.friendUserIds = []
-    else:
-        report.friendIdsScanStatus = "SKIPPED"
 
-    isAdultRoute = report.reviewBucket == adultBgReviewBucket
-    if isAdultRoute and bool(getattr(configModule, "bgIntelligenceFetchGroupsEnabled", True)):
-        await _emitProgress(progressCallback, "Reading Roblox group membership...")
+    async def _scanGroupsStep() -> None:
         try:
             groupResult = await robloxGroups.fetchRobloxGroups(int(report.robloxUserId))
             if groupResult.error:
@@ -2026,21 +2149,37 @@ async def _completeReportScan(
             log.exception("BG intelligence group scan failed unexpectedly.")
             report.groupScanStatus = "ERROR"
             report.groupScanError = _unexpectedScanError("Group scan", exc)
-    elif isAdultRoute:
-        report.groupScanStatus = "SKIPPED"
 
-    inventoryEnabled = bool(getattr(configModule, "robloxInventoryScanEnabled", True)) and bool(
-        getattr(configModule, "bgIntelligenceFetchInventoryEnabled", True)
-    )
-    if isAdultRoute and inventoryEnabled:
-        await _emitProgress(progressCallback, "Reviewing inventory and item values...")
+    async def _scanInventoryStep() -> None:
+        await _emitProgress(progressCallback, "Reviewing inventory and item values [loading flagged visual references]...")
         try:
-            visualReferenceHashes = await flagService.getValidatedItemVisualHashes(
+            visualReferences = await flagService.getValidatedItemVisualReferences(
                 ensureSynced=True,
             )
+            visualReferenceHashes = {
+                int(assetId): str(details.get("thumbnailHash") or "").strip()
+                for assetId, details in visualReferences.items()
+                if str(details.get("thumbnailHash") or "").strip()
+            }
+            visualReferenceColorSignatures = {
+                int(assetId): str(details.get("colorSignature") or "").strip()
+                for assetId, details in visualReferences.items()
+                if str(details.get("colorSignature") or "").strip()
+            }
+            visualReferenceMetadata = {
+                int(assetId): {
+                    "name": str(details.get("assetName") or "").strip() or None,
+                    "assetTypeId": details.get("assetTypeId"),
+                    "assetTypeName": str(details.get("assetTypeName") or "").strip() or None,
+                    "visualCategory": str(details.get("visualCategory") or "").strip(),
+                }
+                for assetId, details in visualReferences.items()
+            }
         except Exception:
             log.exception("BG intelligence visual reference sync failed unexpectedly.")
             visualReferenceHashes = {}
+            visualReferenceColorSignatures = {}
+            visualReferenceMetadata = {}
         try:
             inventoryMaxPages = int(
                 getattr(
@@ -2058,8 +2197,11 @@ async def _completeReportScan(
                 targetCreatorIds=rules.creatorIds,
                 targetKeywords=rules.itemKeywords,
                 visualReferenceHashes=visualReferenceHashes,
+                visualReferenceColorSignatures=visualReferenceColorSignatures,
+                visualReferenceMetadata=visualReferenceMetadata,
                 maxPages=inventoryMaxPages,
                 includeValue=True,
+                progressCallback=progressCallback,
             )
             report.inventorySummary = inventoryResult.summary or {}
             if inventoryResult.error:
@@ -2083,11 +2225,8 @@ async def _completeReportScan(
             log.exception("BG intelligence inventory scan failed unexpectedly.")
             report.inventoryScanStatus = "ERROR"
             report.inventoryScanError = _unexpectedScanError("Inventory scan", exc)
-    elif isAdultRoute:
-        report.inventoryScanStatus = "SKIPPED"
 
-    if isAdultRoute and bool(getattr(configModule, "bgIntelligenceFetchGamepassesEnabled", True)):
-        await _emitProgress(progressCallback, "Pricing owned gamepasses...")
+    async def _scanGamepassesStep() -> None:
         try:
             try:
                 gamepassMaxPages = int(getattr(configModule, "bgIntelligenceGamepassMaxPages", 0))
@@ -2125,11 +2264,8 @@ async def _completeReportScan(
             log.exception("BG intelligence gamepass scan failed unexpectedly.")
             report.gamepassScanStatus = "ERROR"
             report.gamepassScanError = _unexpectedScanError("Gamepass scan", exc)
-    elif isAdultRoute:
-        report.gamepassScanStatus = "SKIPPED"
 
-    if isAdultRoute and bool(getattr(configModule, "bgIntelligenceFetchFavoriteGamesEnabled", True)):
-        await _emitProgress(progressCallback, "Checking favorite games...")
+    async def _scanFavoriteGamesStep() -> None:
         try:
             gameResult = await robloxGames.fetchRobloxFavoriteGames(
                 int(report.robloxUserId),
@@ -2146,14 +2282,8 @@ async def _completeReportScan(
             log.exception("BG intelligence favorite-game scan failed unexpectedly.")
             report.favoriteGameScanStatus = "ERROR"
             report.favoriteGameScanError = _unexpectedScanError("Favorite-game scan", exc)
-    elif isAdultRoute:
-        report.favoriteGameScanStatus = "SKIPPED"
 
-    outfitEnabled = bool(getattr(configModule, "robloxOutfitScanEnabled", True)) and bool(
-        getattr(configModule, "bgIntelligenceFetchOutfitsEnabled", True)
-    )
-    if isAdultRoute and outfitEnabled:
-        await _emitProgress(progressCallback, "Checking saved outfits...")
+    async def _scanOutfitsStep() -> None:
         try:
             outfitResult = await robloxOutfits.fetchRobloxUserOutfits(
                 int(report.robloxUserId),
@@ -2170,11 +2300,8 @@ async def _completeReportScan(
             log.exception("BG intelligence outfit scan failed unexpectedly.")
             report.outfitScanStatus = "ERROR"
             report.outfitScanError = _unexpectedScanError("Outfit scan", exc)
-    elif isAdultRoute:
-        report.outfitScanStatus = "SKIPPED"
 
-    if bool(getattr(configModule, "bgIntelligenceFetchBadgeHistoryEnabled", True)):
-        await _emitProgress(progressCallback, "Collecting the full badge timeline...")
+    async def _scanBadgeHistoryStep() -> None:
         try:
             try:
                 badgeHistoryMaxPages = int(getattr(configModule, "bgIntelligenceBadgeHistoryMaxPages", 0))
@@ -2198,46 +2325,54 @@ async def _completeReportScan(
                         historyComplete=badgeHistoryComplete,
                         historyNextCursor=badgeHistoryResult.nextCursor,
                     )
-            else:
-                report.badgeHistoryScanStatus = "OK"
-                report.badgeHistorySample = badgeHistoryResult.badges
-                badgeIds = {
-                    badgeId
-                    for badgeId in (_badgeIdFromSample(badge) for badge in badgeHistoryResult.badges)
-                    if badgeId is not None
-                }
-                if badgeIds:
-                    awardResult = await robloxBadges.fetchRobloxBadgeAwards(
-                        int(report.robloxUserId),
-                        badgeIds,
-                        batchSize=int(getattr(configModule, "robloxBadgeScanBatchSize", 50) or 50),
-                    )
-                    if awardResult.error:
-                        if awardResult.badges:
-                            _mergeBadgeAwardDates(badgeHistoryResult.badges, awardResult.badges)
-                        hasTimelineDates = bool(awardResult.badges) or _hasDatedBadges(badgeHistoryResult.badges)
-                        report.badgeTimelineSummary = _buildBadgeTimelineSummary(
-                            badgeHistoryResult.badges,
-                            awardDateStatus="PARTIAL" if hasTimelineDates else "ERROR",
-                            awardDateError=awardResult.error,
-                            historyComplete=badgeHistoryComplete,
-                            historyNextCursor=badgeHistoryResult.nextCursor,
-                        )
-                    else:
-                        _mergeBadgeAwardDates(badgeHistoryResult.badges, awardResult.badges)
-                        report.badgeTimelineSummary = _buildBadgeTimelineSummary(
-                            badgeHistoryResult.badges,
-                            awardDateStatus="OK",
-                            historyComplete=badgeHistoryComplete,
-                            historyNextCursor=badgeHistoryResult.nextCursor,
-                        )
-                else:
-                    report.badgeTimelineSummary = _buildBadgeTimelineSummary(
-                        badgeHistoryResult.badges,
-                        awardDateStatus="OK",
-                        historyComplete=badgeHistoryComplete,
-                        historyNextCursor=badgeHistoryResult.nextCursor,
-                    )
+                return
+            report.badgeHistoryScanStatus = "OK"
+            report.badgeHistorySample = badgeHistoryResult.badges
+            badgeIds = {
+                badgeId
+                for badgeId in (_badgeIdFromSample(badge) for badge in badgeHistoryResult.badges)
+                if badgeId is not None
+            }
+            if not badgeIds:
+                report.badgeTimelineSummary = _buildBadgeTimelineSummary(
+                    badgeHistoryResult.badges,
+                    awardDateStatus="OK",
+                    historyComplete=badgeHistoryComplete,
+                    historyNextCursor=badgeHistoryResult.nextCursor,
+                )
+                return
+            if _allBadgesHaveAwardDates(badgeHistoryResult.badges):
+                report.badgeTimelineSummary = _buildBadgeTimelineSummary(
+                    badgeHistoryResult.badges,
+                    awardDateStatus="OK",
+                    historyComplete=badgeHistoryComplete,
+                    historyNextCursor=badgeHistoryResult.nextCursor,
+                )
+                return
+            awardResult = await robloxBadges.fetchRobloxBadgeAwards(
+                int(report.robloxUserId),
+                badgeIds,
+                batchSize=int(getattr(configModule, "robloxBadgeScanBatchSize", 50) or 50),
+            )
+            if awardResult.error:
+                if awardResult.badges:
+                    _mergeBadgeAwardDates(badgeHistoryResult.badges, awardResult.badges)
+                hasTimelineDates = bool(awardResult.badges) or _hasDatedBadges(badgeHistoryResult.badges)
+                report.badgeTimelineSummary = _buildBadgeTimelineSummary(
+                    badgeHistoryResult.badges,
+                    awardDateStatus="PARTIAL" if hasTimelineDates else "ERROR",
+                    awardDateError=awardResult.error,
+                    historyComplete=badgeHistoryComplete,
+                    historyNextCursor=badgeHistoryResult.nextCursor,
+                )
+                return
+            _mergeBadgeAwardDates(badgeHistoryResult.badges, awardResult.badges)
+            report.badgeTimelineSummary = _buildBadgeTimelineSummary(
+                badgeHistoryResult.badges,
+                awardDateStatus="OK",
+                historyComplete=badgeHistoryComplete,
+                historyNextCursor=badgeHistoryResult.nextCursor,
+            )
         except Exception as exc:
             log.exception("BG intelligence badge history scan failed unexpectedly.")
             report.badgeHistoryScanStatus = "ERROR"
@@ -2248,9 +2383,113 @@ async def _completeReportScan(
                 awardDateError=report.badgeHistoryScanError,
                 historyComplete=False,
             )
+
+    parallelIdentityTasks: list[asyncio.Task[Any]] = []
+    if bool(getattr(configModule, "bgIntelligenceFetchUsernameHistoryEnabled", True)):
+        parallelIdentityTasks.append(
+            asyncio.create_task(
+                _runTimedStep(
+                    "Checking Roblox username history...",
+                    _scanUsernameHistoryStep,
+                    debugTimingRecorder=debugTimingRecorder,
+                )
+            )
+        )
+    else:
+        report.usernameHistoryScanStatus = "SKIPPED"
+    if bool(getattr(configModule, "bgIntelligenceFetchConnectionsEnabled", True)):
+        parallelIdentityTasks.append(
+            asyncio.create_task(
+                _runTimedStep(
+                    "Checking Roblox connection counts...",
+                    _scanConnectionCountsStep,
+                    debugTimingRecorder=debugTimingRecorder,
+                )
+            )
+        )
+    else:
+        report.connectionScanStatus = "SKIPPED"
+    if bool(getattr(configModule, "bgIntelligenceFetchFriendIdsEnabled", True)):
+        parallelIdentityTasks.append(
+            asyncio.create_task(
+                _runTimedStep(
+                    "Sampling Roblox friends for known-member overlap...",
+                    _scanFriendIdsStep,
+                    debugTimingRecorder=debugTimingRecorder,
+                )
+            )
+        )
+    else:
+        report.friendIdsScanStatus = "SKIPPED"
+    if isAdultRoute and bool(getattr(configModule, "bgIntelligenceFetchGroupsEnabled", True)):
+        parallelIdentityTasks.append(
+            asyncio.create_task(
+                _runTimedStep(
+                    "Reading Roblox group membership...",
+                    _scanGroupsStep,
+                    debugTimingRecorder=debugTimingRecorder,
+                )
+            )
+        )
+    elif isAdultRoute:
+        report.groupScanStatus = "SKIPPED"
+    if parallelIdentityTasks:
+        await asyncio.gather(*parallelIdentityTasks)
+    report.directMatches = _directMatchesForReport(report, rules)
+    await externalTask
+
+    parallelHistoryTasks: list[asyncio.Task[Any]] = []
+    if isAdultRoute and bool(getattr(configModule, "bgIntelligenceFetchFavoriteGamesEnabled", True)):
+        parallelHistoryTasks.append(
+            asyncio.create_task(
+                _runTimedStep(
+                    "Checking favorite games...",
+                    _scanFavoriteGamesStep,
+                    debugTimingRecorder=debugTimingRecorder,
+                )
+            )
+        )
+    elif isAdultRoute:
+        report.favoriteGameScanStatus = "SKIPPED"
+    if isAdultRoute and outfitEnabled:
+        parallelHistoryTasks.append(
+            asyncio.create_task(
+                _runTimedStep(
+                    "Checking saved outfits...",
+                    _scanOutfitsStep,
+                    debugTimingRecorder=debugTimingRecorder,
+                )
+            )
+        )
+    elif isAdultRoute:
+        report.outfitScanStatus = "SKIPPED"
+    if bool(getattr(configModule, "bgIntelligenceFetchBadgeHistoryEnabled", True)):
+        parallelHistoryTasks.append(
+            asyncio.create_task(
+                _runTimedStep(
+                    "Collecting the full badge timeline...",
+                    _scanBadgeHistoryStep,
+                    debugTimingRecorder=debugTimingRecorder,
+                )
+            )
+        )
     else:
         report.badgeHistoryScanStatus = "SKIPPED"
         report.badgeTimelineSummary = _buildBadgeTimelineSummary([], awardDateStatus="SKIPPED")
+
+    if isAdultRoute and inventoryEnabled:
+        await _scanInventoryStep()
+    elif isAdultRoute:
+        report.inventoryScanStatus = "SKIPPED"
+
+    if parallelHistoryTasks:
+        await asyncio.gather(*parallelHistoryTasks)
+
+    if isAdultRoute and bool(getattr(configModule, "bgIntelligenceFetchGamepassesEnabled", True)):
+        await _emitProgress(progressCallback, "Pricing owned gamepasses...")
+        await _scanGamepassesStep()
+    elif isAdultRoute:
+        report.gamepassScanStatus = "SKIPPED"
 
     badgeEnabled = bool(getattr(configModule, "robloxBadgeScanEnabled", True)) and bool(
         getattr(configModule, "bgIntelligenceFetchBadgesEnabled", True)
@@ -2311,7 +2550,13 @@ async def _completeReportScan(
         report.badgeScanStatus = "SKIPPED"
 
     await _emitProgress(progressCallback, "Correlating known-member alt evidence...")
-    await _safeDetectKnownMemberAltMatches(report, guildId=int(guildId), configModule=configModule)
+    await _safeDetectKnownMemberAltMatches(
+        report,
+        guildId=int(guildId),
+        configModule=configModule,
+        progressCallback=progressCallback,
+        debugTimingRecorder=debugTimingRecorder,
+    )
 
     await _emitProgress(progressCallback, "Loading recent local BG context...")
     try:
@@ -2344,6 +2589,7 @@ async def buildReport(
     reviewer: discord.User | discord.Member | None = None,
     configModule: Any = config,
     progressCallback: ProgressCallback | None = None,
+    debugTimingRecorder: DebugTimingRecorder | None = None,
 ) -> BgIntelligenceReport:
     await _emitProgress(progressCallback, "Loading scan rules...")
     reviewBucket, reviewBucketSource = await resolveReviewBucket(
@@ -2428,6 +2674,7 @@ async def buildReport(
         reviewer=reviewer,
         configModule=configModule,
         progressCallback=progressCallback,
+        debugTimingRecorder=debugTimingRecorder,
     )
 
 
@@ -2441,6 +2688,7 @@ async def buildReportForDiscordId(
     reviewBucketOverride: str = "auto",
     configModule: Any = config,
     progressCallback: ProgressCallback | None = None,
+    debugTimingRecorder: DebugTimingRecorder | None = None,
 ) -> BgIntelligenceReport:
     await _emitProgress(progressCallback, "Loading scan rules...")
     normalizedOverride = str(reviewBucketOverride or "auto").strip().lower()
@@ -2523,6 +2771,7 @@ async def buildReportForDiscordId(
         reviewer=None,
         configModule=configModule,
         progressCallback=progressCallback,
+        debugTimingRecorder=debugTimingRecorder,
     )
 
 
@@ -2534,6 +2783,7 @@ async def buildReportForRobloxIdentity(
     reviewBucketOverride: str = "auto",
     configModule: Any = config,
     progressCallback: ProgressCallback | None = None,
+    debugTimingRecorder: DebugTimingRecorder | None = None,
 ) -> BgIntelligenceReport:
     await _emitProgress(progressCallback, "Loading scan rules...")
     normalizedOverride = str(reviewBucketOverride or "auto").strip().lower()
@@ -2596,6 +2846,7 @@ async def buildReportForRobloxIdentity(
         reviewer=None,
         configModule=configModule,
         progressCallback=progressCallback,
+        debugTimingRecorder=debugTimingRecorder,
     )
 
 
@@ -2760,6 +3011,7 @@ def reportToDict(report: BgIntelligenceReport) -> dict[str, Any]:
         "externalSourceDetails": report.externalSourceDetails or [],
         "priorReportSummary": report.priorReportSummary or {},
         "privateInventoryDmSent": report.privateInventoryDmSent,
+        "debugTimingSummary": report.debugTimingSummary or {},
     }
 
 

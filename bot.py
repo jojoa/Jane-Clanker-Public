@@ -1,14 +1,46 @@
 ﻿import asyncio
 import logging
 import os
-from pathlib import Path
 import sys
-import threading
-import time
-from datetime import datetime, timedelta, timezone
+import traceback
+from asyncio import AbstractEventLoop
+from pathlib import Path
+from datetime import datetime, timezone
 
-from dotenv import load_dotenv, find_dotenv
-import codecs
+
+def _installEarlyStartupExceptionLog() -> None:
+    if bool(getattr(sys, "_jane_early_startup_log_installed", False)):
+        return
+    setattr(sys, "_jane_early_startup_log_installed", True)
+    previousHook = sys.excepthook
+
+    def _writeEarlyException(excType: type[BaseException], excValue: BaseException, excTraceback) -> None:
+        try:
+            logPath = Path(__file__).resolve().parent / "logs" / "general-errors.log"
+            logPath.parent.mkdir(parents=True, exist_ok=True)
+            rendered = "".join(traceback.format_exception(excType, excValue, excTraceback)).rstrip()
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            with logPath.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f"[{timestamp}] ERROR runtime.startup-fallback\n"
+                    "Unhandled exception before Jane finished installing runtime logging.\n"
+                    f"{rendered}\n"
+                    f"{'-' * 90}\n"
+                )
+        except Exception:
+            pass
+
+    def _earlyStartupExceptionHook(excType: type[BaseException], excValue: BaseException, excTraceback) -> None:
+        if issubclass(excType, KeyboardInterrupt):
+            previousHook(excType, excValue, excTraceback)
+            return
+        _writeEarlyException(excType, excValue, excTraceback)
+        previousHook(excType, excValue, excTraceback)
+
+    sys.excepthook = _earlyStartupExceptionHook
+
+
+_installEarlyStartupExceptionLog()
 
 import discord
 from discord import app_commands
@@ -28,26 +60,31 @@ from features.staff.sessions import (
 from features.staff.sessions.Roblox import robloxTransport, robloxUsers
 from runtime import (
     auditStream as runtimeAuditStream,
+    backups as runtimeBackups,
     botProfile as runtimeBotProfile,
     bootstrap as runtimeBootstrap,
     configSanity as runtimeConfigSanity,
     commandPermissions as runtimeCommandPermissions,
+    entrypoint as runtimeEntrypoint,
     extensionLayout as runtimeExtensionLayout,
     errorLogging as runtimeErrorLogging,
     errors as runtimeErrors,
+    eventLoopWatchdog as runtimeEventLoopWatchdog,
     eventIngest as runtimeEventIngest,
     featureFlags as runtimeFeatureFlags,
     gamblingApi as runtimeGamblingApi,
     helpCommands as runtimeHelpCommands,
     interaction as interactionRuntime,
-    loggingConsole as runtimeLoggingConsole,
+    janeIdentityWeb as runtimeJaneIdentityWeb,
     maintenance as runtimeMaintenance,
     metricsExport as runtimeMetricsExport,
     orgFeatureGate as runtimeOrgFeatureGate,
+    orbatAudit as runtimeOrbatAudit,
     pauseState as runtimePauseState,
     permissions as runtimePermissions,
     privateServices as runtimePrivateServices,
     pluginRegistry as runtimePluginRegistry,
+    processResources as runtimeProcessResources,
     retryQueue as runtimeRetryQueue,
     singleInstance as runtimeSingleInstance,
     taskBudgeter,
@@ -81,12 +118,14 @@ _lockedPrefixCommandTokens = {
     "?perm-sim",
     "?permsim",
     "?ruid",
-    "?cpurgejane"
+    "?cpurgejane",
     "!pairdbnames",
+    "!janeflagsync",
 }
 _manualTextCommandTokens = _lockedPrefixCommandTokens | {
     "!casinotoggle",
     "!janeterminal",
+    "!viewallchannels",
     ":)help",
     "?trainingstats",
     "?hoststats",
@@ -121,6 +160,7 @@ _singleInstanceLock = runtimeSingleInstance.SingleInstanceLock(
 _retryQueue = runtimeRetryQueue.RetryQueueCoordinator(
     taskBudgeter=taskBudgeter,
     pollIntervalSec=int(getattr(config, "retryQueuePollIntervalSec", 6) or 6),
+    initialDelaySec=int(getattr(config, "retryQueueInitialDelaySec", 30) or 30),
 )
 _auditStream = runtimeAuditStream.AuditStream(
     botClient=botClient,
@@ -132,7 +172,10 @@ _webhookHealthWatcher = runtimeWebhookHealth.WebhookHealthWatcher(
     taskBudgeter=taskBudgeter,
     auditStream=_auditStream,
     checkIntervalSec=int(getattr(config, "webhookHealthCheckIntervalSec", 600) or 600),
+    initialDelaySec=int(getattr(config, "webhookHealthInitialDelaySec", 180) or 180),
+    maxRowsPerRun=int(getattr(config, "webhookHealthMaxRowsPerRun", 50) or 50),
 )
+_eventLoopWatchdog = runtimeEventLoopWatchdog.EventLoopWatchdog(configModule=config)
 _gitUpdateCoordinator = (
     runtimeGitUpdate.GitUpdateCoordinator(
         botClient=botClient,
@@ -182,103 +225,22 @@ _errorCoordinator = runtimeErrors.ErrorCoordinator(
 )
 _metricsExporter: runtimeMetricsExport.MetricsExporter | None = None
 _gamblingApiServer: runtimeGamblingApi.GamblingApiServer | None = None
+_janeIdentityWebServer: runtimeJaneIdentityWeb.JaneIdentityWebServer | None = None
 _trainingLogSyncTask: asyncio.Task | None = None
 _trainingLogCaptureTasks: dict[int, asyncio.Task] = {}
 _botProfileBioTask: asyncio.Task | None = None
 _botProfileBioStarted = False
 
 
-def _formatUptime(delta: timedelta) -> str:
-    totalSec = max(0, int(delta.total_seconds()))
-    days, rem = divmod(totalSec, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, seconds = divmod(rem, 60)
-    if days > 0:
-        return f"{days}d {hours:02d}h {minutes:02d}m {seconds:02d}s"
-    return f"{hours:02d}h {minutes:02d}m {seconds:02d}s"
-
-
-def _discordTimestamp(value: datetime, style: str = "s") -> str:
-    dt = value
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return f"<t:{int(dt.timestamp())}:{style}>"
-
-
-def _formatBytes(value: int | None) -> str:
-    if value is None or value < 0:
-        return "unavailable"
-    units = ["B", "KB", "MB", "GB", "TB"]
-    size = float(value)
-    unitIndex = 0
-    while size >= 1024.0 and unitIndex < len(units) - 1:
-        size /= 1024.0
-        unitIndex += 1
-    return f"{size:.2f} {units[unitIndex]}"
-
-
-def _getProcessRssBytes() -> int | None:
-    # Windows: use GetProcessMemoryInfo from psapi.
-    if os.name == "nt":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class _ProcessMemoryCounters(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
-
-            counters = _ProcessMemoryCounters()
-            counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
-            processHandle = ctypes.windll.kernel32.GetCurrentProcess()
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-                processHandle,
-                ctypes.byref(counters),
-                counters.cb,
-            )
-            if ok:
-                return int(counters.WorkingSetSize)
-        except Exception:
-            return None
-
-    # POSIX fallback: resource.ru_maxrss.
-    try:
-        import resource  # type: ignore
-
-        maxRss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        if maxRss <= 0:
-            return None
-        # Linux reports KB, macOS reports bytes.
-        if sys.platform == "darwin":
-            return maxRss
-        return maxRss * 1024
-    except Exception:
-        return None
+_formatUptime = runtimeProcessResources.formatUptime
+_discordTimestamp = runtimeProcessResources.discordTimestamp
 
 
 def _getProcessResourceSnapshot(nowUtc: datetime) -> dict[str, str]:
-    uptimeSec = max((nowUtc - _botStartedAt).total_seconds(), 1.0)
-    cpuSec = max(time.process_time(), 0.0)
-    cpuCount = max(int(os.cpu_count() or 1), 1)
-    avgCpuPercent = (cpuSec / (uptimeSec * cpuCount)) * 100.0
-    avgCpuPercent = max(0.0, min(avgCpuPercent, 999.9))
-
-    return {
-        "pid": str(os.getpid()),
-        "threads": str(threading.active_count()),
-        "rss": _formatBytes(_getProcessRssBytes()),
-        "cpuPercent": f"{avgCpuPercent:.2f}%",
-    }
+    return runtimeProcessResources.getProcessResourceSnapshot(
+        botStartedAt=_botStartedAt,
+        nowUtc=nowUtc,
+    )
 
 
 _metricsExporter = runtimeMetricsExport.MetricsExporter(
@@ -296,6 +258,10 @@ _gamblingApiServer = runtimeGamblingApi.GamblingApiServer(
     configModule=config,
     metricsProvider=_metricsExporter.snapshot,
 )
+_janeIdentityWebServer = runtimeJaneIdentityWeb.JaneIdentityWebServer(
+    configModule=config,
+    botClient=botClient,
+)
 _trainingLogCoordinator = trainingLogService.TrainingLogCoordinator(
     botClient=botClient,
     configModule=config,
@@ -307,10 +273,12 @@ _trainingLogCoordinator = trainingLogService.TrainingLogCoordinator(
 
 async def _runTrainingLogStartupSync() -> None:
     await botClient.wait_until_ready()
-    delaySec = max(0.0, float(getattr(config, "trainingLogStartupSyncDelaySec", 20) or 0))
+    delaySec = max(0.0, float(getattr(config, "trainingLogStartupSyncDelaySec", 90) or 0))
     if delaySec > 0:
         await asyncio.sleep(delaySec)
-    await _trainingLogCoordinator.ensureSummaryPanelAtBottom()
+    await taskBudgeter.runLowPriorityDiscord(
+        lambda: _trainingLogCoordinator.ensureSummaryPanelAtBottom()
+    )
     maxAttempts = 3
     retryDelaySec = 30
     for attempt in range(1, maxAttempts + 1):
@@ -319,7 +287,9 @@ async def _runTrainingLogStartupSync() -> None:
             attempt,
             maxAttempts,
         )
-        await _trainingLogCoordinator.syncRecentMessages()
+        await taskBudgeter.runLowPriorityDiscord(
+            lambda: _trainingLogCoordinator.syncRecentMessages()
+        )
         if getattr(_trainingLogCoordinator, "_lastReadySyncAt", None) is not None:
             logging.info("Training log startup sync completed.")
             return
@@ -389,11 +359,13 @@ def _startBotProfileBioTask() -> None:
         return
     _botProfileBioStarted = True
     task = asyncio.create_task(
-        runtimeBotProfile.updateJaneBioOnStartup(
-            botClient=botClient,
-            configModule=config,
-            taskBudgeter=taskBudgeter,
-            repoRoot=Path(__file__).resolve().parent,
+        taskBudgeter.runLowPriorityDiscord(
+            lambda: runtimeBotProfile.updateJaneBioOnStartup(
+                botClient=botClient,
+                configModule=config,
+                taskBudgeter=taskBudgeter,
+                repoRoot=Path(__file__).resolve().parent,
+            )
         ),
         name="jane-profile-bio-update",
     )
@@ -582,8 +554,30 @@ async def _maybeSyncRoleBasedOrbats(member: discord.Member, guildId: int) -> Non
                 result.get("section"),
                 result.get("targetRank"),
             )
+            try:
+                payload = runtimeOrbatAudit.buildRoleSyncChangeLog(
+                    memberMention=member.mention,
+                    result=result,
+                )
+                if payload:
+                    await runtimeOrbatAudit.sendOrbatChangeLog(
+                        botClient,
+                        **payload,
+                    )
+            except Exception:
+                logging.exception(
+                    "Failed to emit role-based ORBAT audit log for member %s.",
+                    member.id,
+                )
     except Exception:
         logging.exception("Role-based ORBAT sync failed for member %s.", member.id)
+
+
+async def _scheduleRoleBasedOrbatSync(member: discord.Member, guildId: int) -> None:
+    delaySec = max(0.0, float(getattr(config, "roleOrbatSyncBackgroundDelaySec", 5) or 0))
+    if delaySec > 0:
+        await asyncio.sleep(delaySec)
+    await taskBudgeter.runBackground(lambda: _maybeSyncRoleBasedOrbats(member, guildId))
 
 
 async def _postRuntimeWebhookMessage(
@@ -650,8 +644,8 @@ def _isGuildAllowedForCommands(guildId: int | None) -> bool:
 
 
 def _persistAllowedCommandGuildId(guildId: int) -> bool:
-    configPath = Path(__file__).resolve().with_name("config.py")
-    source = configPath.read_text(encoding="utf-8")
+    settingsPath = Path(__file__).resolve().parent / "settings" / "core.py"
+    source = settingsPath.read_text(encoding="utf-8")
     newline = "\r\n" if "\r\n" in source else "\n"
     lines = source.splitlines()
 
@@ -666,7 +660,7 @@ def _persistAllowedCommandGuildId(guildId: int) -> bool:
             break
 
     if startIndex < 0 or endIndex <= startIndex:
-        raise RuntimeError("allowedCommandGuildIds block not found in config.py")
+        raise RuntimeError("allowedCommandGuildIds block not found in settings/core.py")
 
     for line in lines[startIndex + 1 : endIndex]:
         raw = str(line or "").strip().rstrip(",")
@@ -679,7 +673,7 @@ def _persistAllowedCommandGuildId(guildId: int) -> bool:
 
     lines.insert(endIndex, f"    {int(guildId)},")
     trailingNewline = newline if source.endswith(("\n", "\r\n")) else ""
-    configPath.write_text(newline.join(lines) + trailingNewline, encoding="utf-8")
+    settingsPath.write_text(newline.join(lines) + trailingNewline, encoding="utf-8")
     return True
 
 
@@ -708,6 +702,7 @@ def _allowGuildForCommands(guildId: int | None) -> str:
     if guildIdInt not in configuredGuildIds:
         configuredGuildIds.append(guildIdInt)
         setattr(config, "allowedCommandGuildIds", configuredGuildIds)
+    runtimePermissions.clearPermissionCaches()
 
     if alreadyAllowed:
         return "already"
@@ -715,7 +710,7 @@ def _allowGuildForCommands(guildId: int | None) -> str:
     try:
         wroteConfig = _persistAllowedCommandGuildId(guildIdInt)
     except Exception:
-        logging.exception("Failed to persist allowed command guild %s into config.py.", guildIdInt)
+        logging.exception("Failed to persist allowed command guild %s into settings/core.py.", guildIdInt)
         return "runtime-only"
 
     return "added" if wroteConfig else "already"
@@ -785,12 +780,20 @@ async def _handleCopyServerCommand(message: discord.Message) -> bool:
     return await _getTextCommandRouter().handleCopyServer(message)
 
 
+async def _handleViewAllChannelsCommand(message: discord.Message) -> bool:
+    return await _getTextCommandRouter().handleViewAllChannels(message)
+
+
 async def _handleBgCheckCommand(message: discord.Message) -> bool:
     return await _getTextCommandRouter().handleBgCheckCommand(message)
 
 
 async def _handleBgLeaderboardCommand(message: discord.Message) -> bool:
     return await _getTextCommandRouter().handleBgLeaderboardCommand(message)
+
+
+async def _handleJaneFlagSyncCommand(message: discord.Message) -> bool:
+    return await _getTextCommandRouter().handleJaneFlagSync(message)
 
 
 async def _handlePermissionSimulatorCommand(message: discord.Message) -> bool:
@@ -832,8 +835,11 @@ async def _retryErrorMirrorDmHandler(payload: dict) -> None:
 
 @botClient.event
 async def setup_hook() -> None:
-    runtimeErrorLogging.installAsyncioExceptionLogging(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    runtimeErrorLogging.installAsyncioExceptionLogging(loop)
     _retryQueue.registerHandler("error-mirror-dm", _retryErrorMirrorDmHandler)
+    runtimeErrors.installErrorMirrorLogging(coordinator=_errorCoordinator, loop=loop)
+    _eventLoopWatchdog.start()
     _retryQueue.start()
     _webhookHealthWatcher.start()
     botClient.runtimeServices = {
@@ -844,6 +850,7 @@ async def setup_hook() -> None:
         "auditStream": _auditStream,
         "metricsExporter": _metricsExporter,
         "webhookHealthWatcher": _webhookHealthWatcher,
+        "janeIdentityWebServer": _janeIdentityWebServer,
         "gitUpdateCoordinator": _gitUpdateCoordinator,
         "generalErrorLogPath": runtimeErrorLogging.currentProcessLogSummary(configModule=config),
         "createBgCheckQueue": (
@@ -857,6 +864,7 @@ async def setup_hook() -> None:
     }
     await _bootstrapCoordinator.setupHook()
     await _gamblingApiServer.start()
+    await _janeIdentityWebServer.start()
     if _gitUpdateCoordinator is not None:
         _gitUpdateCoordinator.start()
     _startTrainingLogSyncTask()
@@ -864,6 +872,7 @@ async def setup_hook() -> None:
 
 @botClient.event
 async def on_ready() -> None:
+    botClient.loop_ref = asyncio.get_running_loop()
     await _bootstrapCoordinator.onReady()
     logging.info("on_ready reached; ensuring training log startup sync task is running.")
     _startBotProfileBioTask()
@@ -961,7 +970,9 @@ async def interactionSafetyCheck(interaction: discord.Interaction) -> bool:
             ephemeral=True,
         )
         return False
-    featureEnabled, featureKey = await _featureFlags.isCommandEnabled(int(interaction.guild.id), commandName)
+    featureEnabled, featureKey, featureCacheHit = _featureFlags.isCommandEnabledCached(guildId, commandName)
+    if not featureCacheHit:
+        _featureFlags.refreshCommandFlagCacheSoon(guildId, commandName)
     if not featureEnabled:
         await _safeInteractionSend(
             interaction,
@@ -993,7 +1004,10 @@ async def interactionSafetyCheck(interaction: discord.Interaction) -> bool:
         return False
     _activeAppCommandInvocations[key] = datetime.now(timezone.utc)
     if isinstance(interaction.user, discord.Member):
-        asyncio.create_task(_maybeSyncRoleBasedOrbats(interaction.user, interaction.guild.id))
+        asyncio.create_task(
+            _scheduleRoleBasedOrbatSync(interaction.user, interaction.guild.id),
+            name=f"role-orbat-sync:{interaction.user.id}",
+        )
     return True
 
 
@@ -1043,16 +1057,65 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     await _errorCoordinator.handlePrefixCommandError(ctx=ctx, error=error)
 
 
+_runtimeCleanupStarted = False
+_originalBotClientClose = botClient.close
+
+
+async def _cleanupRuntimeServices() -> None:
+    global _runtimeCleanupStarted
+    if _runtimeCleanupStarted:
+        return
+    _runtimeCleanupStarted = True
+
+    async def _runCleanupStep(label: str, awaitableFactory) -> None:
+        try:
+            await awaitableFactory()
+        except Exception:
+            logging.exception("Runtime cleanup step failed: %s", label)
+
+    try:
+        _maintenanceCoordinator.cancelBackgroundTasks()
+    except Exception:
+        logging.exception("Runtime cleanup step failed: maintenance tasks")
+    await _runCleanupStep("event loop watchdog", _eventLoopWatchdog.stop)
+    if _gitUpdateCoordinator is not None:
+        await _runCleanupStep("git updater", _gitUpdateCoordinator.stop)
+    await _runCleanupStep("webhook health watcher", _webhookHealthWatcher.stop)
+    await _runCleanupStep("retry queue", _retryQueue.stop)
+    await _runCleanupStep("Jane Identity web callback", _janeIdentityWebServer.stop)
+    await _runCleanupStep("gambling API", _gamblingApiServer.stop)
+    await _runCleanupStep("Roblox HTTP session", robloxTransport.closeHttpSession)
+    if bool(getattr(config, "dbRuntimeSnapshotOnShutdown", True)):
+        async def _captureDbShutdownSnapshot() -> None:
+            label = (
+                "restart"
+                if runtimeProcessControl is not None and runtimeProcessControl.restartRequested()
+                else "shutdown"
+            )
+            capture = await runtimeBackups.captureRuntimeDbState(config, label=label)
+            logging.info(
+                "Runtime DB %s snapshot captured: snapshot=%s report=%s%s",
+                label,
+                capture.get("snapshotPath") or "none",
+                capture.get("reportPath") or "none",
+                f" error={capture.get('snapshotError')}" if capture.get("snapshotError") else "",
+            )
+
+        await _runCleanupStep("runtime DB snapshot", _captureDbShutdownSnapshot)
+    await _runCleanupStep("SQLite connection", closeDb)
+
+
+async def _closeBotClientWithCleanup() -> None:
+    await _cleanupRuntimeServices()
+    await _originalBotClientClose()
+
+
+botClient.close = _closeBotClientWithCleanup  # type: ignore[method-assign]
+
+
 @botClient.event
 async def on_close() -> None:
-    _maintenanceCoordinator.cancelBackgroundTasks()
-    if _gitUpdateCoordinator is not None:
-        await _gitUpdateCoordinator.stop()
-    await _webhookHealthWatcher.stop()
-    await _retryQueue.stop()
-    await _gamblingApiServer.stop()
-    await robloxTransport.closeHttpSession()
-    await closeDb()
+    await _cleanupRuntimeServices()
 
 async def _alreadyProcessedJohnLog(messageId: int) -> bool:
     row = await fetchOne(
@@ -1108,6 +1171,27 @@ async def _handleIngestedEvent(
     if row == 0:
         logging.warning("ORBAT row not found for host %s in John log %s.", hostId, message.id)
         return
+
+    try:
+        await runtimeOrbatAudit.sendOrbatChangeLog(
+            botClient,
+            title="Spreadsheet Change",
+            change="Incremented ORBAT event counter from John event log.",
+            requestedBy=f"<@{hostId}>",
+            authorizedBy="John event log",
+            requestMessageUrl=message.jump_url,
+            details=(
+                f"Category: {category if category in {'shift', 'other'} else 'other'} | "
+                f"Column: {columnKey} | "
+                f"Row: {int(row)}"
+            ),
+            sheetKey="generalStaff",
+        )
+    except Exception:
+        logging.exception(
+            "Failed to post ORBAT increment audit log for John message %s.",
+            message.id,
+        )
 
     await _markProcessedJohnLog(message, hostId, category if category in {"shift", "other"} else "other")
 
@@ -1198,6 +1282,8 @@ async def on_message(message: discord.Message) -> None:
         await sillyCommands.maybeHandleSillyMentions(message, botClient)
         if await _handleJaneHelp(message):
             return
+        if await _handleViewAllChannelsCommand(message):
+            return
         if not _isCommandExecutionAllowed(int(message.author.id)):
             if token in _lockedPrefixCommandTokens:
                 await message.channel.send(_temporaryLockMessage)
@@ -1232,6 +1318,8 @@ async def on_message(message: discord.Message) -> None:
         if await _handleJaneRuntime(message):
             return
         if await _handleBgLeaderboardCommand(message):
+            return
+        if await _handleJaneFlagSyncCommand(message):
             return
         if await _handlePermissionSimulatorCommand(message):
             return
@@ -1275,102 +1363,21 @@ async def handleRobloxRetry(interaction: discord.Interaction) -> None:
         return
     if handled:
         return
-
-def has_utf8_bom(filepath):
-    with open(filepath, 'rb') as f:
-        header = f.read(3)
-        return header.startswith(codecs.BOM_UTF8)
-
-
-def _discordStartupRetryConfig() -> tuple[int, float, float]:
     try:
-        maxAttempts = int(getattr(config, "discordStartupMaxAttempts", 6) or 6)
-    except (TypeError, ValueError):
-        maxAttempts = 6
-    try:
-        baseDelaySec = float(getattr(config, "discordStartupRetryBaseSec", 15) or 15)
-    except (TypeError, ValueError):
-        baseDelaySec = 15.0
-    try:
-        maxDelaySec = float(getattr(config, "discordStartupRetryMaxDelaySec", 120) or 120)
-    except (TypeError, ValueError):
-        maxDelaySec = 120.0
-    return max(1, maxAttempts), max(0.0, baseDelaySec), max(0.0, maxDelaySec)
-
-
-def _isRetryableDiscordStartupError(exc: BaseException) -> bool:
-    if isinstance(exc, discord.DiscordServerError):
-        return True
-    if isinstance(exc, discord.HTTPException):
-        try:
-            status = int(getattr(exc, "status", 0) or 0)
-        except (TypeError, ValueError):
-            status = 0
-        return status in {500, 502, 503, 504}
-    if isinstance(exc, (ConnectionError, OSError, TimeoutError)):
-        return True
-    moduleName = exc.__class__.__module__
-    return moduleName.startswith("aiohttp.")
-
-
-def _runBotWithStartupRetry(token: str) -> None:
-    maxAttempts, baseDelaySec, maxDelaySec = _discordStartupRetryConfig()
-    attempt = 1
-    while True:
-        try:
-            botClient.run(token, log_handler=None)
-            return
-        except discord.LoginFailure:
-            raise
-        except discord.PrivilegedIntentsRequired:
-            raise
-        except Exception as exc:
-            if not _isRetryableDiscordStartupError(exc) or attempt >= maxAttempts:
-                raise
-            delaySec = min(maxDelaySec, baseDelaySec * (2 ** (attempt - 1)))
-            logging.warning(
-                "Discord startup failed with retryable %s on attempt %d/%d; retrying in %.1fs.",
-                exc.__class__.__name__,
-                attempt,
-                maxAttempts,
-                delaySec,
-            )
-            if botClient.is_closed():
-                botClient.clear()
-            attempt += 1
-            time.sleep(delaySec)
+        handled = await sessionViews.handleSessionControlFallbackInteraction(interaction)
+    except Exception:
+        logging.exception("Session control fallback handler failed.")
+        return
+    if handled:
+        return
 
 
 if __name__ == "__main__":
-    runtimeLoggingConsole.configureConsoleLogging(level=logging.INFO)
-    generalErrorLogPath = runtimeErrorLogging.configureGeneralErrorLogging(configModule=config)
-    runtimeErrorLogging.installGlobalExceptionHooks()
-    logging.info("General error log enabled: %s", generalErrorLogPath)
-    lockAcquired, lockOwnerPid = _singleInstanceLock.acquire()
-    if not lockAcquired:
-        raise RuntimeError(
-            f"Another Jane process is already running for this repo (pid={int(lockOwnerPid or 0) or 'unknown'})."
-        )
-    envPath = find_dotenv(usecwd=True)
-    loadedEnvironmentVariables = load_dotenv(envPath, verbose=True, override=True)
-    if not loadedEnvironmentVariables:
-        raise RuntimeError(".env file not correctly loaded.")
-    if has_utf8_bom(envPath):
-        raise RuntimeError(".env file has a UTF-8 BOM.")
-    logging.info(f"Loaded Environment Variables: {loadedEnvironmentVariables}")
-    logging.info(f"Current .env file: {envPath}")
-    token = os.getenv("DISCORD_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("DISCORD_BOT_TOKEN is not set.")
-    if runtimeProcessControl is not None:
-        runtimeProcessControl.clearRestartRequest()
-    restartRequested = False
-    try:
-        _runBotWithStartupRetry(token)
-        restartRequested = bool(runtimeProcessControl is not None and runtimeProcessControl.restartRequested())
-    finally:
-        _singleInstanceLock.release()
-    if restartRequested and runtimeProcessControl is not None:
-        logging.warning("Runtime restart requested; relaunching Jane.")
-        runtimeProcessControl.relaunchCurrentProcess(scriptPath=__file__)
+    runtimeEntrypoint.runMain(
+        botClient=botClient,
+        configModule=config,
+        singleInstanceLock=_singleInstanceLock,
+        processControlModule=runtimeProcessControl,
+        scriptPath=__file__,
+    )
 

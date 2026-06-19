@@ -1,7 +1,7 @@
 import json
 from typing import Optional, Dict, List
 
-from db.sqlite import execute, executeReturnId, fetchOne, fetchAll, executeMany
+from db.sqlite import execute, executeReturnId, fetchOne, fetchAll, executeMany, runWriteTransaction
 
 
 def _jsonText(value) -> str:
@@ -348,45 +348,65 @@ async def queuePointsBatch(entries: List[tuple[int, int, str, Optional[int]]]) -
 
 
 async def processPendingPoints() -> dict:
-    summary = await fetchOne(
-        """
-        SELECT
-            COUNT(*) AS users,
-            COALESCE(SUM(total), 0) AS points
-        FROM (
-            SELECT userId, SUM(points) AS total
+    async def _tx(db) -> dict:
+        async with db.execute(
+            """
+            SELECT pendingId, userId, points
             FROM points_pending
             WHERE processedAt IS NULL
-            GROUP BY userId
-            HAVING SUM(points) > 0
-        ) grouped
-        """
-    )
-    totalUsers = int((summary or {}).get("users") or 0)
-    totalPoints = int((summary or {}).get("points") or 0)
+            ORDER BY pendingId ASC
+            """
+        ) as cur:
+            rows = await cur.fetchall()
 
-    if totalUsers <= 0 or totalPoints <= 0:
-        await execute(
-            "UPDATE points_pending SET processedAt = datetime('now') WHERE processedAt IS NULL"
-        )
-        return {"users": 0, "points": 0}
+        if not rows:
+            return {"users": 0, "points": 0}
 
-    await execute(
-        """
-        INSERT INTO points (userId, pointsTotal)
-        SELECT userId, SUM(points) AS total
-        FROM points_pending
-        WHERE processedAt IS NULL
-        GROUP BY userId
-        HAVING SUM(points) > 0
-        ON CONFLICT(userId) DO UPDATE SET
-            pointsTotal = points.pointsTotal + excluded.pointsTotal
-        """
-    )
-    await execute(
-        "UPDATE points_pending SET processedAt = datetime('now') WHERE processedAt IS NULL"
-    )
-    return {"users": totalUsers, "points": totalPoints}
+        pendingIds: list[int] = []
+        totalsByUserId: dict[int, int] = {}
+        for row in rows:
+            pendingId = int(row["pendingId"] or 0)
+            userId = int(row["userId"] or 0)
+            points = int(row["points"] or 0)
+            if pendingId > 0:
+                pendingIds.append(pendingId)
+            if userId > 0 and points > 0:
+                totalsByUserId[userId] = totalsByUserId.get(userId, 0) + points
+
+        positiveRows = [
+            (userId, pointsTotal)
+            for userId, pointsTotal in totalsByUserId.items()
+            if pointsTotal > 0
+        ]
+        if positiveRows:
+            await db.executemany(
+                """
+                INSERT INTO points (userId, pointsTotal)
+                VALUES (?, ?)
+                ON CONFLICT(userId) DO UPDATE SET
+                    pointsTotal = points.pointsTotal + excluded.pointsTotal
+                """,
+                positiveRows,
+            )
+
+        if pendingIds:
+            placeholders = ",".join("?" for _ in pendingIds)
+            await db.execute(
+                f"""
+                UPDATE points_pending
+                SET processedAt = datetime('now')
+                WHERE processedAt IS NULL
+                  AND pendingId IN ({placeholders})
+                """,
+                tuple(pendingIds),
+            )
+
+        return {
+            "users": len(positiveRows),
+            "points": sum(pointsTotal for _, pointsTotal in positiveRows),
+        }
+
+    return await runWriteTransaction(_tx)
 
 async def getSetting(key: str) -> Optional[str]:
     row = await fetchOne("SELECT value FROM bot_settings WHERE key = ?", (key,))

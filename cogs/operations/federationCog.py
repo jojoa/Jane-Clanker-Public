@@ -11,26 +11,7 @@ from runtime import commandScopes as runtimeCommandScopes
 
 class FederationCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
-    @app_commands.command(name="federation-link", description="Link this guild to another Jane guild.")
-    @app_commands.guilds(*runtimeCommandScopes.getTestGuildObjects())
-    @app_commands.describe(
-        linked_guild_id="The first guild ID to link to.",
-        linked_guild_id_2="Optional second guild ID to link to.",
-        link_type="Why this guild is linked.",
-        note="Optional note for staff.",
-    )
-    @app_commands.rename(
-        linked_guild_id="linked-guild-id",
-        linked_guild_id_2="linked-guild-id-2",
-        link_type="link-type",
-    )
-    @app_commands.choices(
-        link_type=[
-            app_commands.Choice(name="Shared Staff", value="SHARED_STAFF"),
-            app_commands.Choice(name="Review Routing", value="REVIEW_ROUTING"),
-            app_commands.Choice(name="Mirror", value="MIRROR"),
-        ]
-    )
+    # Legacy slash handler kept for future reuse.
     async def federationLink(
         self,
         interaction: discord.Interaction,
@@ -79,9 +60,7 @@ class FederationCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             f"Linked this guild to {linkedSummary} as `{link_type.value}`.",
         )
 
-    @app_commands.command(name="federation-unlink", description="Remove a guild federation link.")
-    @app_commands.guilds(*runtimeCommandScopes.getTestGuildObjects())
-    @app_commands.rename(linked_guild_id="linked-guild-id")
+    # Legacy slash handler kept for future reuse.
     async def federationUnlink(self, interaction: discord.Interaction, linked_guild_id: str) -> None:
         member = await self._requireAdminOrManageGuild(interaction)
         if member is None:
@@ -98,8 +77,7 @@ class FederationCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         )
         await self._safeReply(interaction, f"Removed federation link to `{linkedGuildId}` if it existed.")
 
-    @app_commands.command(name="federation-list", description="List linked Jane guilds for this server.")
-    @app_commands.guilds(*runtimeCommandScopes.getTestGuildObjects())
+    # Legacy slash handler kept for future reuse.
     async def federationList(self, interaction: discord.Interaction) -> None:
         member = await self._requireAdminOrManageGuild(interaction)
         if member is None:

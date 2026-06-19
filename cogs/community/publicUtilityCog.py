@@ -24,7 +24,174 @@ from features.community.publicUtility import (
     resolveAssignableRole,
 )
 from runtime import cogGuards as runtimeCogGuards
+from runtime import interaction as interactionRuntime
 from runtime import permissions as runtimePermissions
+from runtime import viewBases as runtimeViewBases
+
+
+def _parsePositiveId(raw: object) -> int:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if not digits:
+        return 0
+    try:
+        parsed = int(digits)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+class ReactionRoleMenuModal(discord.ui.Modal, title="Post Role Menu"):
+    menuKey = discord.ui.TextInput(
+        label="Menu key",
+        required=True,
+        max_length=64,
+        placeholder="Example: colors",
+    )
+
+    def __init__(self, cog: "PublicUtilityCog") -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.postRoleMenu(
+            interaction,
+            menu_key=str(self.menuKey.value or "").strip(),
+        )
+
+
+class ReactionRoleButtonsModal(discord.ui.Modal, title="Create Reaction-Role Message"):
+    titleInput = discord.ui.TextInput(
+        label="Embed title",
+        required=True,
+        max_length=120,
+        placeholder="Choose Your Roles",
+    )
+    descriptionInput = discord.ui.TextInput(
+        label="Embed description",
+        required=False,
+        max_length=1500,
+        style=discord.TextStyle.paragraph,
+        placeholder="Click a button below to add or remove roles.",
+    )
+    rowsInput = discord.ui.TextInput(
+        label="Buttons",
+        required=True,
+        max_length=1500,
+        style=discord.TextStyle.paragraph,
+        placeholder="@Role | Label | 😀\n@Role2 | Label 2\n@Role3",
+    )
+
+    def __init__(self, cog: "PublicUtilityCog") -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.runCreateReactionRoleButtons(
+            interaction,
+            title=str(self.titleInput.value or "").strip(),
+            description=str(self.descriptionInput.value or "").strip(),
+            rowsText=str(self.rowsInput.value or "").strip(),
+        )
+
+
+class ReactionRoleRemoveModal(discord.ui.Modal, title="Remove Reaction-Role Button"):
+    messageIdInput = discord.ui.TextInput(
+        label="Message ID",
+        required=True,
+        max_length=32,
+        placeholder="123456789012345678",
+    )
+    roleInput = discord.ui.TextInput(
+        label="Role mention or ID",
+        required=True,
+        max_length=64,
+        placeholder="@Members or 123456789012345678",
+    )
+
+    def __init__(self, cog: "PublicUtilityCog") -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.runRemoveReactionRoleButton(
+            interaction,
+            messageIdText=str(self.messageIdInput.value or "").strip(),
+            roleText=str(self.roleInput.value or "").strip(),
+        )
+
+
+class ReactionRolePolicyModal(discord.ui.Modal):
+    roleInput = discord.ui.TextInput(
+        label="Role mention or ID",
+        required=True,
+        max_length=64,
+        placeholder="@Members or 123456789012345678",
+    )
+
+    def __init__(self, cog: "PublicUtilityCog", *, action: str) -> None:
+        self.cog = cog
+        self.action = str(action or "").strip().lower()
+        title = "Block Reaction-Role" if self.action == "block" else "Unblock Reaction-Role"
+        super().__init__(title=title, timeout=300)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if self.action == "block":
+            await self.cog.runBlockReactionRole(
+                interaction,
+                roleText=str(self.roleInput.value or "").strip(),
+            )
+            return
+        await self.cog.runUnblockReactionRole(
+            interaction,
+            roleText=str(self.roleInput.value or "").strip(),
+        )
+
+
+class ReactionRolePanelView(runtimeViewBases.OwnerLockedView):
+    def __init__(
+        self,
+        cog: "PublicUtilityCog",
+        *,
+        openerId: int,
+        canManageButtons: bool,
+        canManagePolicy: bool,
+        canPostMenus: bool,
+    ) -> None:
+        super().__init__(openerId=openerId, timeout=600, ownerMessage="This reaction-role panel belongs to someone else.")
+        self.cog = cog
+        if not canPostMenus:
+            self.postMenuBtn.disabled = True
+        if not canManageButtons:
+            self.createButtonsBtn.disabled = True
+            self.removeButtonBtn.disabled = True
+        if not canManagePolicy:
+            self.blockRoleBtn.disabled = True
+            self.unblockRoleBtn.disabled = True
+            self.blockedListBtn.disabled = True
+
+    @discord.ui.button(label="Post Menu", style=discord.ButtonStyle.secondary, row=0)
+    async def postMenuBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interactionRuntime.safeInteractionSendModal(interaction, ReactionRoleMenuModal(self.cog))
+
+    @discord.ui.button(label="Create Buttons", style=discord.ButtonStyle.primary, row=0)
+    async def createButtonsBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interactionRuntime.safeInteractionSendModal(interaction, ReactionRoleButtonsModal(self.cog))
+
+    @discord.ui.button(label="Remove Button", style=discord.ButtonStyle.secondary, row=0)
+    async def removeButtonBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interactionRuntime.safeInteractionSendModal(interaction, ReactionRoleRemoveModal(self.cog))
+
+    @discord.ui.button(label="Block Role", style=discord.ButtonStyle.danger, row=1)
+    async def blockRoleBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interactionRuntime.safeInteractionSendModal(interaction, ReactionRolePolicyModal(self.cog, action="block"))
+
+    @discord.ui.button(label="Unblock Role", style=discord.ButtonStyle.success, row=1)
+    async def unblockRoleBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interactionRuntime.safeInteractionSendModal(interaction, ReactionRolePolicyModal(self.cog, action="unblock"))
+
+    @discord.ui.button(label="Blocked List", style=discord.ButtonStyle.secondary, row=1)
+    async def blockedListBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.cog.listBlockedReactionRoles(interaction)
 
 
 class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
@@ -46,6 +213,22 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 out.add(parsed)
         return out
 
+    def _canManageReactionRoleButtons(self, member: discord.Member) -> bool:
+        allowedRoleIds = self._configuredRoleIdSet("reactionRoleCommandRoleIds")
+        if not allowedRoleIds:
+            return runtimePermissions.hasAdminOrManageGuild(member)
+        memberRoleIds = {int(role.id) for role in member.roles}
+        return bool(memberRoleIds & allowedRoleIds)
+
+    def _canManageReactionRolePolicy(self, member: discord.Member) -> bool:
+        policyRoleIds = self._configuredRoleIdSet("reactionRolePolicyRoleIds")
+        if not policyRoleIds:
+            policyRoleIds = self._configuredRoleIdSet("reactionRoleCommandRoleIds")
+        if not policyRoleIds:
+            return runtimePermissions.hasAdminOrManageGuild(member)
+        memberRoleIds = {int(role.id) for role in member.roles}
+        return bool(memberRoleIds & policyRoleIds)
+
     async def _requireReactionRoleCommandAccess(
         self,
         interaction: discord.Interaction,
@@ -53,14 +236,7 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         member = await self._requireGuildMember(interaction)
         if member is None:
             return None
-        allowedRoleIds = self._configuredRoleIdSet("reactionRoleCommandRoleIds")
-        if not allowedRoleIds:
-            if runtimePermissions.hasAdminOrManageGuild(member):
-                return member
-            await self._safeReply(interaction, "Administrator or manage-server required.")
-            return None
-        memberRoleIds = {int(role.id) for role in member.roles}
-        if memberRoleIds & allowedRoleIds:
+        if self._canManageReactionRoleButtons(member):
             return member
         await self._safeReply(interaction, "You do not have permission to manage reaction roles.")
         return None
@@ -72,16 +248,7 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         member = await self._requireGuildMember(interaction)
         if member is None:
             return None
-        policyRoleIds = self._configuredRoleIdSet("reactionRolePolicyRoleIds")
-        if not policyRoleIds:
-            policyRoleIds = self._configuredRoleIdSet("reactionRoleCommandRoleIds")
-        if not policyRoleIds:
-            if runtimePermissions.hasAdminOrManageGuild(member):
-                return member
-            await self._safeReply(interaction, "Administrator or manage-server required.")
-            return None
-        memberRoleIds = {int(role.id) for role in member.roles}
-        if memberRoleIds & policyRoleIds:
+        if self._canManageReactionRolePolicy(member):
             return member
         await self._safeReply(interaction, "You do not have permission to change reaction-role safety rules.")
         return None
@@ -93,6 +260,18 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         return discord.Embed(
             title=safeTitle or "REACTION ROLES",
             description=safeDescription or "Click a button below to add or remove roles.",
+            color=discord.Color.blurple(),
+        )
+
+    @staticmethod
+    def _buildReactionRolePanelEmbed() -> discord.Embed:
+        return discord.Embed(
+            title="Reaction-Role Manager",
+            description=(
+                "Use the buttons below to manage self-role menus and button-role messages.\n"
+                "Create button rows with one line per role using `role | label | emoji`.\n"
+                "Example: `@Members | Members | 😀`"
+            ),
             color=discord.Color.blurple(),
         )
 
@@ -130,8 +309,7 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         except (discord.Forbidden, discord.HTTPException, KeyError):
             return
 
-    @app_commands.command(name="post-role-menu", description="Post a public self-role menu.")
-    @app_commands.rename(menu_key="menu-key")
+    # Legacy slash handler kept for future reuse.
     async def postRoleMenu(self, interaction: discord.Interaction, menu_key: str) -> None:
         if await self._requireAdminOrManageGuild(interaction) is None:
             return
@@ -188,165 +366,57 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         except (discord.Forbidden, discord.HTTPException, discord.NotFound):
             return None
 
-    @app_commands.command(
-        name="create-reaction-role",
-        description="Post a role message with one button.",
-    )
-    async def createReactionRole(
+    async def _createReactionRoleMessage(
         self,
         interaction: discord.Interaction,
+        *,
         title: str,
         description: str,
-        role: discord.Role,
-        label: str,
-        emoji: Optional[str] = None,
+        rows: list[tuple[discord.Role, str, str]],
     ) -> None:
-        if await self._requireReactionRoleCommandAccess(interaction) is None:
-            return
         if not interaction.guild:
-            return await self._safeReply(interaction, "Use this command in a server.")
+            await self._safeReply(interaction, "Use this command in a server.")
+            return
         channel = interaction.channel
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return await self._safeReply(interaction, "Use this command in a text channel or thread.")
-        botMember = await self._resolveBotMember(interaction.guild)
-        if botMember is None:
-            return await self._safeReply(interaction, "Jane could not resolve her member record in this server.")
-        if not await self._isRoleAllowedForSelfAssign(guild=interaction.guild, role=role, botMember=botMember):
-            return await self._safeReply(interaction, "That role is blocked or I cannot manage it.")
-        try:
-            message = await channel.send(
-                embed=self._buildReactionRoleEmbed(title=title, description=description),
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            return await self._safeReply(interaction, "I could not post the button-role message here.")
-
-        safeLabel = str(label or role.name).strip()[:80] or role.name
-        await createButtonRoleEntry(
-            guildId=int(interaction.guild.id),
-            channelId=int(channel.id),
-            messageId=int(message.id),
-            roleId=int(role.id),
-            buttonLabel=safeLabel,
-            emojiSpec=str(emoji or "").strip(),
-            orderIndex=0,
-        )
-        refreshed = await self._refreshButtonRoleMessage(channel=channel, messageId=int(message.id))
-        if not refreshed:
-            return await self._safeReply(interaction, "The message was posted, but I could not attach the button.")
-        await self._safeReply(
-            interaction,
-            f"Created reaction-role message `{int(message.id)}` and linked `{safeLabel}` to {role.mention}.",
-        )
-
-    @app_commands.command(
-        name="create-reaction-role-bulk",
-        description="Post a role message with up to seven buttons.",
-    )
-    @app_commands.rename(
-        role_1="role-1",
-        label_1="label-1",
-        emoji_1="emoji-1",
-        role_2="role-2",
-        label_2="label-2",
-        emoji_2="emoji-2",
-        role_3="role-3",
-        label_3="label-3",
-        emoji_3="emoji-3",
-        role_4="role-4",
-        label_4="label-4",
-        emoji_4="emoji-4",
-        role_5="role-5",
-        label_5="label-5",
-        emoji_5="emoji-5",
-        role_6="role-6",
-        label_6="label-6",
-        emoji_6="emoji-6",
-        role_7="role-7",
-        label_7="label-7",
-        emoji_7="emoji-7",
-    )
-    async def createReactionRoleBulk(
-        self,
-        interaction: discord.Interaction,
-        title: str,
-        description: str,
-        role_1: discord.Role,
-        label_1: str,
-        emoji_1: Optional[str] = None,
-        role_2: Optional[discord.Role] = None,
-        label_2: Optional[str] = None,
-        emoji_2: Optional[str] = None,
-        role_3: Optional[discord.Role] = None,
-        label_3: Optional[str] = None,
-        emoji_3: Optional[str] = None,
-        role_4: Optional[discord.Role] = None,
-        label_4: Optional[str] = None,
-        emoji_4: Optional[str] = None,
-        role_5: Optional[discord.Role] = None,
-        label_5: Optional[str] = None,
-        emoji_5: Optional[str] = None,
-        role_6: Optional[discord.Role] = None,
-        label_6: Optional[str] = None,
-        emoji_6: Optional[str] = None,
-        role_7: Optional[discord.Role] = None,
-        label_7: Optional[str] = None,
-        emoji_7: Optional[str] = None,
-    ) -> None:
-        if await self._requireReactionRoleCommandAccess(interaction) is None:
+            await self._safeReply(interaction, "Use this command in a text channel or thread.")
             return
-        if not interaction.guild:
-            return await self._safeReply(interaction, "Use this command in a server.")
-        channel = interaction.channel
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return await self._safeReply(interaction, "Use this command in a text channel or thread.")
         botMember = await self._resolveBotMember(interaction.guild)
         if botMember is None:
-            return await self._safeReply(interaction, "Jane could not resolve her member record in this server.")
+            await self._safeReply(interaction, "Jane could not resolve her member record in this server.")
+            return
 
-        rawRows = [
-            (role_1, label_1, emoji_1),
-            (role_2, label_2, emoji_2),
-            (role_3, label_3, emoji_3),
-            (role_4, label_4, emoji_4),
-            (role_5, label_5, emoji_5),
-            (role_6, label_6, emoji_6),
-            (role_7, label_7, emoji_7),
-        ]
         validRows: list[tuple[discord.Role, str, str]] = []
         seenRoleIds: set[int] = set()
-        for index, (roleValue, labelValue, emojiValue) in enumerate(rawRows, start=1):
-            if roleValue is None:
-                if labelValue or emojiValue:
-                    return await self._safeReply(
-                        interaction,
-                        f"Slot {index} needs a role if you fill in the label or emoji.",
-                    )
-                continue
+        for index, (roleValue, labelValue, emojiValue) in enumerate(rows, start=1):
             safeLabel = str(labelValue or roleValue.name).strip()[:80]
             if not safeLabel:
-                return await self._safeReply(interaction, f"Slot {index} is missing a label.")
+                await self._safeReply(interaction, f"Slot {index} is missing a label.")
+                return
             if int(roleValue.id) in seenRoleIds:
-                return await self._safeReply(interaction, f"Do not repeat {roleValue.mention} in the same command.")
+                await self._safeReply(interaction, f"Do not repeat {roleValue.mention} in the same message.")
+                return
             if not await self._isRoleAllowedForSelfAssign(
                 guild=interaction.guild,
                 role=roleValue,
                 botMember=botMember,
             ):
-                return await self._safeReply(
-                    interaction,
-                    f"{roleValue.mention} is blocked or I cannot manage it.",
-                )
+                await self._safeReply(interaction, f"{roleValue.mention} is blocked or I cannot manage it.")
+                return
             validRows.append((roleValue, safeLabel, str(emojiValue or "").strip()))
             seenRoleIds.add(int(roleValue.id))
+
         if not validRows:
-            return await self._safeReply(interaction, "Add at least one role button.")
+            await self._safeReply(interaction, "Add at least one role button.")
+            return
 
         try:
             message = await channel.send(
                 embed=self._buildReactionRoleEmbed(title=title, description=description),
             )
         except (discord.Forbidden, discord.HTTPException):
-            return await self._safeReply(interaction, "I could not post the reaction-role message here.")
+            await self._safeReply(interaction, "I could not post the reaction-role message here.")
+            return
 
         addedLines: list[str] = []
         for orderIndex, (roleValue, safeLabel, emojiSpec) in enumerate(validRows):
@@ -363,23 +433,62 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
 
         refreshed = await self._refreshButtonRoleMessage(channel=channel, messageId=int(message.id))
         if not refreshed:
-            return await self._safeReply(interaction, "The message was posted, but I could not attach the buttons.")
+            await self._safeReply(interaction, "The message was posted, but I could not attach the buttons.")
+            return
         await self._safeReply(
             interaction,
             "Created reaction-role message "
             f"`{int(message.id)}` with {len(validRows)} button(s):\n" + "\n".join(addedLines),
         )
 
-    @app_commands.command(
-        name="remove-reaction-role",
-        description="Remove a role button from a message.",
-    )
-    @app_commands.rename(message_id="message-id")
-    async def removeReactionRole(
+    async def runCreateReactionRoleButtons(
         self,
         interaction: discord.Interaction,
-        message_id: str,
-        role: discord.Role,
+        *,
+        title: str,
+        description: str,
+        rowsText: str,
+    ) -> None:
+        if await self._requireReactionRoleCommandAccess(interaction) is None:
+            return
+        if not interaction.guild:
+            return await self._safeReply(interaction, "Use this command in a server.")
+        rows: list[tuple[discord.Role, str, str]] = []
+        for index, rawLine in enumerate(str(rowsText or "").splitlines(), start=1):
+            line = str(rawLine or "").strip()
+            if not line:
+                continue
+            parts = [part.strip() for part in line.split("|")]
+            if len(parts) > 3:
+                await self._safeReply(interaction, f"Line {index} has too many `|` separators.")
+                return
+            roleId = _parsePositiveId(parts[0] if parts else "")
+            role = interaction.guild.get_role(roleId) if roleId > 0 else None
+            if role is None:
+                await self._safeReply(interaction, f"Line {index} has an invalid role.")
+                return
+            label = parts[1] if len(parts) >= 2 and parts[1] else role.name
+            emoji = parts[2] if len(parts) >= 3 else ""
+            rows.append((role, label, emoji))
+        if not rows:
+            await self._safeReply(interaction, "Add at least one non-empty button row.")
+            return
+        if len(rows) > 7:
+            await self._safeReply(interaction, "Limit the button list to 7 roles per message.")
+            return
+        await self._createReactionRoleMessage(
+            interaction,
+            title=title,
+            description=description,
+            rows=rows,
+        )
+
+    async def runRemoveReactionRoleButton(
+        self,
+        interaction: discord.Interaction,
+        *,
+        messageIdText: str,
+        roleText: str,
     ) -> None:
         if await self._requireReactionRoleCommandAccess(interaction) is None:
             return
@@ -387,10 +496,13 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return await self._safeReply(interaction, "Use this command in the channel that has the target message.")
         try:
-            targetMessageId = int(str(message_id or "").strip())
+            targetMessageId = int(str(messageIdText or "").strip())
         except (TypeError, ValueError):
             return await self._safeReply(interaction, "Message ID must be a number.")
-        await deleteButtonRoleEntry(messageId=targetMessageId, roleId=int(role.id))
+        roleId = _parsePositiveId(roleText)
+        if roleId <= 0:
+            return await self._safeReply(interaction, "Role mention or role ID required.")
+        await deleteButtonRoleEntry(messageId=targetMessageId, roleId=roleId)
         remainingEntries = await listButtonRoleEntries(messageId=targetMessageId)
         if remainingEntries:
             await self._refreshButtonRoleMessage(channel=channel, messageId=targetMessageId)
@@ -400,39 +512,47 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 await message.edit(view=None)
             except (discord.Forbidden, discord.HTTPException, discord.NotFound):
                 pass
+        role = interaction.guild.get_role(roleId) if interaction.guild is not None else None
+        roleMention = role.mention if role is not None else f"<@&{roleId}>"
         await self._safeReply(
             interaction,
-            f"Removed {role.mention} from button-role message `{targetMessageId}`.",
+            f"Removed {roleMention} from button-role message `{targetMessageId}`.",
         )
 
-    @app_commands.command(
-        name="block-reaction-role",
-        description="Block a role from being used in self-assign reaction-role buttons.",
-    )
-    async def blockReactionRole(self, interaction: discord.Interaction, role: discord.Role) -> None:
+    async def runBlockReactionRole(
+        self,
+        interaction: discord.Interaction,
+        *,
+        roleText: str,
+    ) -> None:
         if await self._requireReactionRolePolicyAccess(interaction) is None:
             return
         if not interaction.guild:
             return await self._safeReply(interaction, "Use this command in a server.")
+        roleId = _parsePositiveId(roleText)
+        role = interaction.guild.get_role(roleId)
+        if role is None:
+            return await self._safeReply(interaction, "Role mention or role ID required.")
         await addBlockedSelfRole(guildId=int(interaction.guild.id), roleId=int(role.id))
         await self._safeReply(interaction, f"Blocked {role.mention} from future reaction-role buttons.")
 
-    @app_commands.command(
-        name="unblock-reaction-role",
-        description="Allow a previously blocked role to be used in reaction-role buttons again.",
-    )
-    async def unblockReactionRole(self, interaction: discord.Interaction, role: discord.Role) -> None:
+    async def runUnblockReactionRole(
+        self,
+        interaction: discord.Interaction,
+        *,
+        roleText: str,
+    ) -> None:
         if await self._requireReactionRolePolicyAccess(interaction) is None:
             return
         if not interaction.guild:
             return await self._safeReply(interaction, "Use this command in a server.")
+        roleId = _parsePositiveId(roleText)
+        role = interaction.guild.get_role(roleId)
+        if role is None:
+            return await self._safeReply(interaction, "Role mention or role ID required.")
         await removeBlockedSelfRole(guildId=int(interaction.guild.id), roleId=int(role.id))
         await self._safeReply(interaction, f"Unblocked {role.mention} for reaction-role buttons.")
 
-    @app_commands.command(
-        name="list-blocked-reaction-roles",
-        description="Show which roles are blocked from self-assign reaction-role buttons.",
-    )
     async def listBlockedReactionRoles(self, interaction: discord.Interaction) -> None:
         if await self._requireReactionRolePolicyAccess(interaction) is None:
             return
@@ -453,6 +573,29 @@ class PublicUtilityCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             color=discord.Color.blurple(),
         )
         await self._safeReply(interaction, embed=embed)
+
+    @app_commands.command(name="reaction-role", description="Open the reaction-role control panel.")
+    async def reactionRolePanel(self, interaction: discord.Interaction) -> None:
+        member = await self._requireGuildMember(interaction)
+        if member is None:
+            return
+        canManageButtons = self._canManageReactionRoleButtons(member)
+        canManagePolicy = self._canManageReactionRolePolicy(member)
+        canPostMenus = runtimePermissions.hasAdminOrManageGuild(member)
+        if not canManageButtons and not canManagePolicy and not canPostMenus:
+            await self._safeReply(interaction, "You do not have permission to manage reaction roles.")
+            return
+        await self._safeReply(
+            interaction,
+            embed=self._buildReactionRolePanelEmbed(),
+            view=ReactionRolePanelView(
+                self,
+                openerId=int(member.id),
+                canManageButtons=canManageButtons,
+                canManagePolicy=canManagePolicy,
+                canPostMenus=canPostMenus,
+            ),
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -1,11 +1,12 @@
 ﻿import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 
 import discord
 from discord import ui
 
 import config
+from db.sqlite import runWriteTransaction
 from features.staff.bgflags import service as flagService
 from features.staff.orbat import sheets as orbatSheets
 from runtime import interaction as interactionRuntime
@@ -21,6 +22,7 @@ from features.staff.sessions import (
     bgReviewActions,
     bgScanPipeline,
     bgSpreadsheetRouting,
+    orientationRoverWarmup,
     sessionNotifications,
     postActions,
     service,
@@ -98,6 +100,10 @@ async def handleRobloxRetryInteraction(interaction: discord.Interaction) -> bool
 
 async def handleInventoryRetryInteraction(interaction: discord.Interaction) -> bool:
     return await retryFlow.handleInventoryRetryInteraction(interaction)
+
+
+async def handleSessionControlFallbackInteraction(interaction: discord.Interaction) -> bool:
+    return await sessionControls.handleSessionControlFallbackInteraction(interaction)
 
 
 getRuntimeQueueTelemetry = viewRuntime.getRuntimeQueueTelemetry
@@ -184,7 +190,7 @@ async def restorePersistentViews(bot: discord.Client) -> dict[str, int]:
 
     activeSessions = await service.getSessionsByStatus(["OPEN", "FULL", "GRADING", "FINISHED"])
     maxRestoreAgeHours = max(1, int(getattr(config, "sessionExpiryHours", 48) or 48))
-    restoreCutoff = datetime.utcnow() - timedelta(hours=maxRestoreAgeHours)
+    restoreCutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=maxRestoreAgeHours)
 
     def _isSessionStale(row: dict) -> bool:
         createdRaw = str(row.get("createdAt") or "").strip()
@@ -197,29 +203,37 @@ async def restorePersistentViews(bot: discord.Client) -> dict[str, int]:
                 createdAt = datetime.strptime(createdRaw, "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 return False
+        if createdAt.tzinfo is not None:
+            createdAt = createdAt.astimezone(timezone.utc).replace(tzinfo=None)
         return createdAt < restoreCutoff
 
     for session in activeSessions:
-        if _isSessionStale(session):
-            continue
         sessionId = int(session["sessionId"])
         sessionType = str(session.get("sessionType") or "").lower()
         sessionStatus = str(session.get("status") or "").upper()
         messageId = session.get("messageId")
+        isStale = _isSessionStale(session)
         # Only restore the main orientation/session control panel for truly active sessions.
         # Finished sessions should not regain control buttons after restart.
-        if messageId and sessionType != "bg-check" and sessionStatus in {"OPEN", "FULL", "GRADING"}:
+        if (
+            messageId
+            and sessionType != "bg-check"
+            and sessionStatus in {"OPEN", "FULL", "GRADING"}
+            and not isStale
+        ):
             try:
                 bot.add_view(SessionView(sessionId), message_id=int(messageId))
                 restoredSessionViews += 1
             except Exception:
                 log.exception("Failed to restore SessionView for session %s.", sessionId)
+        if sessionType == "orientation" and sessionStatus in {"OPEN", "FULL", "GRADING"} and not isStale:
+            orientationRoverWarmup.scheduleOrientationRoverWarmup(bot, sessionId)
 
         bgQueueMessageIds = [
             int(session.get("bgQueueMessageId") or 0),
             int(session.get("bgQueueMinorMessageId") or 0),
         ]
-        if any(messageId > 0 for messageId in bgQueueMessageIds):
+        if any(messageId > 0 for messageId in bgQueueMessageIds) and not isStale:
             try:
                 attendees = _bgCandidates(await service.getAttendees(sessionId))
                 # Restore BG queue controls only while queue work is still pending.
@@ -304,8 +318,15 @@ async def _safeInteractionEditMessage(
         await interaction.response.edit_message(**kwargs)
         return True
     except discord.InteractionResponded:
-        await interaction.edit_original_response(**kwargs)
-        return True
+        try:
+            await interaction.edit_original_response(**kwargs)
+            return True
+        except (discord.NotFound, discord.HTTPException) as exc:
+            if not interactionRuntime.isUnknownInteractionError(exc):
+                return False
+        except Exception as exc:
+            if not interactionRuntime._isSafeTransportFailure(exc):
+                raise
     except (discord.NotFound, discord.HTTPException) as exc:
         if not interactionRuntime.isUnknownInteractionError(exc):
             return False
@@ -902,36 +923,55 @@ async def updateBgQueueMessage(bot: discord.Client, sessionId: int) -> None:
     await bgQueueMessaging.updateBgQueueMessage(bot, sessionId)
 
 async def updateSessionMessage(bot: discord.Client, sessionId: int):
-    session = await service.getSession(sessionId)
-    if not session:
-        return
+    try:
+        session = await service.getSession(sessionId)
+        if not session:
+            log.debug("Skipping orientation message refresh; session %s was not found.", sessionId)
+            return
+        channel = await _getCachedChannel(bot, int(session["channelId"]))
+        if channel is None:
+            log.debug(
+                "Skipping orientation message refresh; channel %s was not found for session %s.",
+                session.get("channelId"),
+                sessionId,
+            )
+            return
+        msg = await interactionRuntime.safeFetchMessage(channel, session["messageId"])
+        if msg is None:
+            log.debug(
+                "Skipping orientation message refresh; message %s was not found for session %s.",
+                session.get("messageId"),
+                sessionId,
+            )
+            return
 
-    channel = await _getCachedChannel(bot, int(session["channelId"]))
-    if channel is None:
-        return
-    msg = await interactionRuntime.safeFetchMessage(channel, session["messageId"])
-    if msg is None:
-        return
+        guild = msg.guild
+        host = None
+        if guild:
+            host = guild.get_member(session["hostId"])
+            if host is None:
+                try:
+                    host = await taskBudgeter.runDiscord(lambda: guild.fetch_member(session["hostId"]))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    log.debug("Could not fetch orientation host member for session %s.", sessionId)
+                    host = None
 
-    guild = msg.guild
-    host = None
-    if guild:
-        host = guild.get_member(session["hostId"])
-        if host is None:
-            try:
-                host = await taskBudgeter.runDiscord(lambda: guild.fetch_member(session["hostId"]))
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                host = None
-    attendees = await service.getAttendees(sessionId)
+        attendees = await service.getAttendees(sessionId)
+        showBg = False
+        hostMention = host.mention if host else f"<@{session['hostId']}>"
+        embed = buildSessionEmbed(session, hostMention, attendees, showBg=showBg)
 
-    showBg = False
-    hostMention = host.mention if host else f"<@{session['hostId']}>"
-    embed = buildSessionEmbed(session, hostMention, attendees, showBg=showBg)
-
-    view = SessionView(sessionId)
-    await view.disableIfLocked()
-    await interactionRuntime.safeMessageEdit(msg, embed=embed, view=view)
-
+        view = SessionView(sessionId)
+        await view.disableIfLocked()
+        await interactionRuntime.safeMessageEdit(msg, embed=embed, view=view)
+        log.debug(
+            "Orientation message refreshed: session=%s attendees=%d status=%s.",
+            sessionId,
+            len(attendees),
+            session.get("status"),
+        )
+    except Exception:
+        log.exception("Failed to refresh orientation message for session %s.", sessionId)
 
 def _configureViewRuntimeModule() -> None:
     viewRuntime.configure(

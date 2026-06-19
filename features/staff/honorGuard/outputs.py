@@ -74,7 +74,7 @@ async def syncApprovedLogsToSheet(
             updatedRows += 1
         except Exception:
             failures.append(int(entry.discordUserId))
-            log.exception("Honor Guard sheet sync failed for discord user %s", int(entry.discordUserId))
+            log.exception("Honor-Guard sheet sync failed for discord user %s", int(entry.discordUserId))
     result: dict[str, Any] = {
         "updatedUsers": updatedRows,
         "updatedRows": updatedRows,
@@ -89,17 +89,22 @@ async def sendHonorGuardSheetChangeLog(
     botClient: discord.Client,
     *,
     reviewerId: int,
+    requestedBy: str = "",
+    requestMessageUrl: str = "",
     change: str,
     details: str,
     sheetKey: str = "honorGuard_members",
 ) -> None:
     try:
+        reviewerText = f"<@{int(reviewerId)}>" if int(reviewerId or 0) > 0 else "system"
         await orbatAuditRuntime.sendOrbatChangeLog(
             botClient,
             change=change,
-            authorizedBy=f"<@{int(reviewerId)}>",
+            requestedBy=str(requestedBy or "").strip() or reviewerText,
+            authorizedBy=reviewerText,
+            requestMessageUrl=str(requestMessageUrl or "").strip(),
             details=details,
             sheetKey=sheetKey,
         )
     except Exception:
-        log.exception("Failed to post Honor Guard ORBAT audit log.")
+        log.exception("Failed to post Honor-Guard ORBAT audit log.")

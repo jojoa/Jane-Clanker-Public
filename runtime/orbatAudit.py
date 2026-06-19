@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import quote
 
 import discord
@@ -32,6 +32,26 @@ def _discordTimestamp(value: datetime, style: str = "f") -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return f"<t:{int(value.timestamp())}:{style}>"
+
+
+def _truncateFieldText(value: Any, *, limit: int = 1000) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max(1, int(limit or 1)):
+        return text
+    return f"{text[: max(1, int(limit or 1)) - 3]}..."
+
+
+def buildDiscordMessageUrl(
+    guildId: Any,
+    channelId: Any,
+    messageId: Any,
+) -> str:
+    guildIdInt = _safeInt(guildId)
+    channelIdInt = _safeInt(channelId)
+    messageIdInt = _safeInt(messageId)
+    if guildIdInt <= 0 or channelIdInt <= 0 or messageIdInt <= 0:
+        return ""
+    return f"https://discord.com/channels/{guildIdInt}/{channelIdInt}/{messageIdInt}"
 
 
 def _sheetLink(spreadsheetId: str, sheetName: Optional[str]) -> str:
@@ -168,11 +188,95 @@ def _buildSheetLines(
     return lines or ["(sheet link unavailable)"]
 
 
+def _roleSyncActions(result: Mapping[str, Any], *keys: str) -> list[str]:
+    labels = {
+        "created": "created row",
+        "moved": "moved row",
+        "updated": "updated fields",
+        "rankUpdated": "updated rank",
+    }
+    actions: list[str] = []
+    for key in keys:
+        if result.get(key):
+            actions.append(labels.get(key, key))
+    return actions
+
+
+def buildRoleSyncChangeLog(
+    *,
+    memberMention: str,
+    result: Mapping[str, Any],
+) -> Optional[dict[str, Any]]:
+    syncType = str(result.get("syncType") or "").strip().lower()
+    memberText = str(memberMention or "").strip() or "Unknown user"
+    robloxUsername = str(result.get("robloxUsername") or "").strip() or "Unknown"
+
+    if syncType == "recruitment.anrorsplacement":
+        actions = _roleSyncActions(result, "created", "moved", "updated")
+        if not actions:
+            return None
+        detailsParts = [
+            f"User: {memberText}",
+            f"Roblox: {robloxUsername}",
+            f"Actions: {', '.join(actions)}",
+        ]
+        sectionName = str(result.get("section") or "").strip()
+        if sectionName:
+            detailsParts.append(f"Section: {sectionName}")
+        roleFlags: list[str] = []
+        if result.get("hasAnrorsMemberRole"):
+            roleFlags.append("member role")
+        if result.get("hasAnrorsRmPlusRole"):
+            roleFlags.append("RM+ role")
+        if roleFlags:
+            detailsParts.append(f"Role state: {', '.join(roleFlags)}")
+        return {
+            "change": "Updated Recruitment ORBAT from Discord role sync.",
+            "requestedBy": "automatic role sync",
+            "authorizedBy": "Discord role sync",
+            "details": " | ".join(detailsParts),
+            "sheetKey": "recruitment",
+        }
+
+    if syncType == "department.anrdrankbyrole":
+        actions = _roleSyncActions(result, "created", "rankUpdated")
+        if not actions:
+            return None
+        divisionKey = str(result.get("divisionKey") or "").strip() or "Department"
+        detailsParts = [
+            f"User: {memberText}",
+            f"Roblox: {robloxUsername}",
+            f"Division: {divisionKey}",
+            f"Actions: {', '.join(actions)}",
+        ]
+        targetRank = str(result.get("targetRank") or "").strip()
+        if targetRank:
+            detailsParts.append(f"Target rank: {targetRank}")
+        previousRank = str(result.get("previousRank") or "").strip()
+        if previousRank:
+            detailsParts.append(f"Previous rank: {previousRank}")
+        matchedRoleId = _safeInt(result.get("matchedRoleId"))
+        if matchedRoleId > 0:
+            detailsParts.append(f"Trigger role: <@&{matchedRoleId}>")
+        return {
+            "change": f"Updated {divisionKey} Department ORBAT from Discord role sync.",
+            "requestedBy": "automatic role sync",
+            "authorizedBy": "Discord role sync",
+            "details": " | ".join(detailsParts),
+            "sheetKey": str(result.get("sheetKey") or "").strip() or None,
+            "divisionKey": divisionKey,
+        }
+
+    return None
+
+
 async def sendOrbatChangeLog(
     botClient: discord.Client,
     *,
     change: str,
     authorizedBy: str,
+    requestedBy: Optional[str] = None,
+    requestMessageUrl: Optional[str] = None,
     details: Optional[str] = None,
     sheetKey: Optional[str] = None,
     divisionKey: Optional[str] = None,
@@ -180,6 +284,8 @@ async def sendOrbatChangeLog(
     sheetName: Optional[str] = None,
     label: Optional[str] = None,
     sheetRefs: Optional[list[dict[str, Any]]] = None,
+    occurredAt: Optional[datetime] = None,
+    title: str = "ORBAT Change",
 ) -> None:
     channelId = _safeInt(getattr(config, "orbatAuditChannelId", 0))
     if channelId <= 0:
@@ -195,14 +301,21 @@ async def sendOrbatChangeLog(
     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         return
 
-    now = _nowUtc()
+    now = occurredAt or _nowUtc()
+    changeText = _truncateFieldText(change, limit=1000) or "Unknown"
+    authorizedText = _truncateFieldText(authorizedBy, limit=1000) or "Unknown"
+    requestedText = _truncateFieldText(requestedBy or authorizedText, limit=1000) or "system"
+    requestUrl = str(requestMessageUrl or "").strip()
+    requestValue = f"[Open message]({requestUrl})" if requestUrl else "N/A"
     embed = discord.Embed(
-        title="ORBAT Change",
+        title=str(title or "Spreadsheet Change").strip() or "Spreadsheet Change",
         color=discord.Color.blurple(),
         timestamp=now,
     )
-    embed.add_field(name="Change", value=str(change or "Unknown"), inline=False)
-    embed.add_field(name="Authorized By", value=str(authorizedBy or "Unknown"), inline=False)
+    embed.add_field(name="Change", value=changeText, inline=False)
+    embed.add_field(name="Requested By", value=requestedText, inline=False)
+    embed.add_field(name="Authorized By", value=authorizedText, inline=False)
+    embed.add_field(name="Request Message", value=requestValue, inline=False)
     embed.add_field(name="Time", value=_discordTimestamp(now, "f"), inline=False)
     sheetLines = _buildSheetLines(
         sheetRefs=sheetRefs,
@@ -214,9 +327,7 @@ async def sendOrbatChangeLog(
     )
     embed.add_field(name="Sheet", value="\n".join(sheetLines), inline=False)
     if details:
-        detailText = str(details).strip()
-        if len(detailText) > 1000:
-            detailText = f"{detailText[:997]}..."
+        detailText = _truncateFieldText(details, limit=1000)
         embed.add_field(name="Details", value=detailText, inline=False)
 
     try:

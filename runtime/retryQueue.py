@@ -48,9 +48,12 @@ class RetryQueueCoordinator:
         *,
         taskBudgeter: Any,
         pollIntervalSec: int = 6,
+        initialDelaySec: int = 30,
     ) -> None:
         self.taskBudgeter = taskBudgeter
         self.pollIntervalSec = max(2, int(pollIntervalSec))
+        self.initialDelaySec = max(0, int(initialDelaySec))
+        self.processingLeaseSec = max(60, self.pollIntervalSec * 10)
         self.handlers: dict[str, RetryHandler] = {}
         self.workerTask: asyncio.Task | None = None
         self._workerLock = asyncio.Lock()
@@ -155,6 +158,54 @@ class RetryQueueCoordinator:
             (safeLimit,),
         )
 
+    async def _recoverStaleProcessingJobs(self) -> int:
+        rows = await fetchAll(
+            """
+            SELECT jobId, updatedAt
+            FROM retry_jobs
+            WHERE status = 'PROCESSING'
+            """
+        )
+        if not rows:
+            return 0
+        now = _nowUtc()
+        cutoff = now - timedelta(seconds=max(60, int(self.processingLeaseSec or 60)))
+        recovered = 0
+        for row in rows:
+            jobId = int(row.get("jobId") or 0)
+            if jobId <= 0:
+                continue
+            rawUpdatedAt = str(row.get("updatedAt") or "").strip()
+            try:
+                updatedAt = datetime.fromisoformat(rawUpdatedAt)
+                if updatedAt.tzinfo is None:
+                    updatedAt = updatedAt.replace(tzinfo=timezone.utc)
+                updatedAt = updatedAt.astimezone(timezone.utc)
+            except ValueError:
+                updatedAt = datetime.min.replace(tzinfo=timezone.utc)
+            if updatedAt > cutoff:
+                continue
+            await execute(
+                """
+                UPDATE retry_jobs
+                SET status = 'FAILED',
+                    nextAttemptAt = ?,
+                    lastError = ?,
+                    updatedAt = ?
+                WHERE jobId = ? AND status = 'PROCESSING'
+                """,
+                (
+                    now.isoformat(),
+                    "Recovered stale PROCESSING job after runtime interruption.",
+                    now.isoformat(),
+                    jobId,
+                ),
+            )
+            recovered += 1
+        if recovered:
+            log.warning("Recovered %s stale retry queue job(s).", recovered)
+        return recovered
+
     async def _loadDueJobs(self, *, limit: int = 5) -> list[dict[str, Any]]:
         safeLimit = max(1, min(25, int(limit or 5)))
         return await fetchAll(
@@ -239,6 +290,7 @@ class RetryQueueCoordinator:
 
     async def runTick(self) -> None:
         async with self._workerLock:
+            await self._recoverStaleProcessingJobs()
             jobs = await self._loadDueJobs(limit=6)
             if not jobs:
                 self._lastRunAt = _nowUtc()
@@ -247,10 +299,19 @@ class RetryQueueCoordinator:
                 try:
                     await self.taskBudgeter.runBackground(lambda job=job: self.processOneJob(job))
                 except Exception:
-                    log.exception("Retry queue job failed (jobId=%s).", int(job.get("jobId") or 0))
+                    jobType = str(job.get("jobType") or "").strip().lower()
+                    extra = {"skipErrorMirrorDm": True} if jobType == "error-mirror-dm" else None
+                    log.exception(
+                        "Retry queue job failed (jobId=%s, jobType=%s).",
+                        int(job.get("jobId") or 0),
+                        jobType or "unknown",
+                        extra=extra,
+                    )
             self._lastRunAt = _nowUtc()
 
     async def _runLoop(self) -> None:
+        if self.initialDelaySec > 0:
+            await asyncio.sleep(self.initialDelaySec)
         while True:
             try:
                 await self.runTick()

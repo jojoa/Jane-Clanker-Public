@@ -48,6 +48,12 @@ class AuditStream:
         self.config = configModule
         self.taskBudgeter = taskBudgeter
 
+    async def _runBackgroundDiscord(self, opFactory: Any) -> Any:
+        runner = getattr(self.taskBudgeter, "runLowPriorityDiscord", None)
+        if callable(runner):
+            return await runner(opFactory)
+        return await self.taskBudgeter.runDiscord(opFactory)
+
     def _auditChannelId(self) -> int:
         preferred = _safeInt(getattr(self.config, "auditLogChannelId", 0))
         if preferred > 0:
@@ -199,7 +205,7 @@ class AuditStream:
         channel = self.botClient.get_channel(channelId)
         if channel is None:
             try:
-                channel = await self.taskBudgeter.runDiscord(lambda: self.botClient.fetch_channel(channelId))
+                channel = await self._runBackgroundDiscord(lambda: self.botClient.fetch_channel(channelId))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException, discord.InvalidData):
                 return
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
@@ -235,4 +241,4 @@ class AuditStream:
             detailsText = f"{detailsText[:997]}..."
         embed.add_field(name="Details", value=f"```json\n{detailsText}\n```", inline=False)
 
-        await self.taskBudgeter.runDiscord(lambda: channel.send(embed=embed))
+        await self._runBackgroundDiscord(lambda: channel.send(embed=embed))

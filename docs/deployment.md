@@ -59,7 +59,7 @@ Private/runtime flags:
 - `JANE_ENABLE_PRIVATE_EXTENSIONS`
 - `ENABLE_DESTRUCTIVE_COMMANDS`
 - `DESTRUCTIVE_COMMANDS_DRY_RUN`
-- `JANE_ALLOW_GIT_PULL_ON_RESTART`
+- `JANE_DISABLE_GIT_PULL_ON_RESTART`
 - `JANE_ENABLE_AUTO_GIT_UPDATE`
 
 Optional host/runtime overrides:
@@ -125,12 +125,12 @@ But production should still be treated carefully. A bad push can still be a bad 
 
 Important runtime flags:
 
-- `JANE_ALLOW_GIT_PULL_ON_RESTART`
+- `JANE_DISABLE_GIT_PULL_ON_RESTART`
 - `JANE_ENABLE_AUTO_GIT_UPDATE`
 
 If you want safer operation, the conservative choice is:
 
-- allow manual pull-on-restart
+- keep manual pull-on-restart enabled
 - keep fully automatic update checks conservative or off
 
 ## Files Jane Should Not Treat As Disposable

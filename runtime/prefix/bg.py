@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +9,8 @@ import discord
 from features.staff.sessions import bgSpreadsheetQueue
 from runtime import bgQueueCommand as runtimeBgQueueCommand
 from runtime import orgProfiles
+
+log = logging.getLogger(__name__)
 
 
 async def createBgCheckQueue(
@@ -127,6 +130,22 @@ async def createBgCheckQueue(
             )
             return False, spreadsheet.skipped_reason or "BGC spreadsheet creation failed."
 
+        try:
+            await bgSpreadsheetQueue.sendBgSpreadsheetChangeLog(
+                router.botClient,
+                result=spreadsheet,
+                change="Created background-check spreadsheet.",
+                authorizedBy=actor.mention,
+                requestedBy=actor.mention,
+                requestMessageUrl=str(getattr(sourceMessage, "jump_url", "") or ""),
+                details=(
+                    f"Source guild: {int(sourceGuildIdInt)} | "
+                    f"Pending members: {len(pendingMembers)}"
+                ),
+            )
+        except Exception:
+            log.exception("Failed to post BGC spreadsheet audit log for manual queue creation.")
+
         publicMessage = f"BGC Spreadsheet created: {spreadsheet.url}"
         await channel.send(
             publicMessage,
@@ -227,4 +246,3 @@ async def handleBgLeaderboardCommand(router: Any, message: discord.Message) -> b
         allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
     )
     return True
-

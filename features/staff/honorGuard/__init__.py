@@ -1,4 +1,4 @@
-"""Honor Guard integration helpers."""
+"""Honor-Guard integration helpers."""
 
 from .service import (
     HonorGuardConfig,

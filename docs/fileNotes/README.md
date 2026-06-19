@@ -12,7 +12,10 @@ They are closer to:
 
 Current notes:
 
+- [bgIntelligence.md](bgIntelligence.md)
 - [botPy.md](botPy.md)
+- [copyServer.md](copyServer.md)
+- [janeIdentity.md](janeIdentity.md)
 - [recruitmentSheets.md](recruitmentSheets.md)
 - [serverSafetyCog.md](serverSafetyCog.md)
 - [sqlite.md](sqlite.md)

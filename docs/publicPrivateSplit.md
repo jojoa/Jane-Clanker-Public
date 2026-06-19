@@ -37,6 +37,15 @@ The private optional extensions currently listed are:
 - `plugins.private.runtimeControlExtension`
 - `plugins.private.linkHubExtension`
 
+Private wrappers are not the whole story. If a private wrapper imports a normal-looking cog or service, that underlying code also needs to be treated as private during export.
+
+For example, Link Hub is loaded through `plugins.private.linkHubExtension`, but the real code lives in:
+
+- `cogs/operations/linkHubCog.py`
+- `features/operations/linkHub/`
+
+Those paths should stay out of the public export with the wrapper.
+
 ## Hard Gates For Risky Stuff
 
 Just having the file is not supposed to be enough.
@@ -49,7 +58,7 @@ Risky actions should also require:
 - cooldowns
 - audit logging
 
-That way a bad merge is still annoying, but not automatically catastrophic.
+That way a mistaken merge is still annoying, but not automatically catastrophic.
 
 ## Public Export
 
@@ -65,6 +74,7 @@ That export currently:
 
 - strips known private-only paths
 - strips private runtime secret command hooks from public files
+- strips application Google Form URLs from `configData/divisions.json`
 - rewrites the private extension list to an empty scaffold
 - sanitizes parts of `config.py`
 - runs a secret scan
@@ -75,6 +85,28 @@ The smoke test currently does:
 - `compileall`
 - import smoke on core modules
 - import smoke on exported extensions
+
+## When Adding A Private Thing
+
+The boring checklist is:
+
+- put the optional loader in `plugins/private`
+- keep the normal runtime guard in place, usually `JANE_ENABLE_PRIVATE_EXTENSIONS`
+- add the real cog, service, tests, and helper files to the public exporter blocklist if they are private
+- make sure the public export still compiles after the private pieces are stripped
+
+Do not rely on "it is not loaded" as the only privacy boundary. If the code itself should not be public, export should remove it.
+
+## Public Branches
+
+Public branches can be useful for outside work, but they may not be cleanly based on the current private repo by the time they come back.
+
+Before porting a public branch into private:
+
+- compare the branch against the current private model
+- avoid copying exported config churn or public-only cleanup
+- keep private-only runtime and safety tooling from being deleted
+- prefer small ports of the useful behavior over broad checkouts
 
 ## Important Rule
 

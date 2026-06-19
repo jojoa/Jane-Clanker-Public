@@ -8,10 +8,11 @@ from types import SimpleNamespace
 
 import characters
 import config
-from cogs.staff.bgIntelligenceCog import BgIntelDetailsView
+import discord
+from cogs.staff.bgIntelligenceCog import BgIntelDetailsView, BgIntelligenceCog, BgIntelProgressRelay
 from features.staff.bgIntelligence import rendering, scoring, service
 from features.staff.sessions import bgBuckets
-from features.staff.sessions.Roblox import robloxBadges, robloxGamepasses, robloxInventoryApi, robloxInventoryVisual
+from features.staff.sessions.Roblox import robloxAssets, robloxBadges, robloxGamepasses, robloxInventoryApi, robloxInventoryVisual
 
 
 def _report(**overrides):
@@ -278,6 +279,31 @@ class BgIntelligenceScoringTests(unittest.TestCase):
         self.assertTrue(any("social footprint" in signal.label for signal in thinScore.signals))
         self.assertTrue(any("social footprint looks established" in signal.label for signal in establishedScore.signals))
 
+    def test_repeated_no_score_results_do_not_add_risk_points(self):
+        baselinePrior = {
+            "totalRecent": 0,
+            "highRiskRecent": 0,
+            "noScoreRecent": 0,
+            "queueApprovals": 0,
+            "queueRejections": 0,
+            "rows": [],
+        }
+        repeatedNoScorePrior = {
+            "totalRecent": 2,
+            "highRiskRecent": 0,
+            "noScoreRecent": 2,
+            "queueApprovals": 0,
+            "queueRejections": 0,
+            "rows": [],
+        }
+
+        baselineScore = scoring.scoreReport(_report(priorReportSummary=baselinePrior))
+        repeatedNoScoreScore = scoring.scoreReport(_report(priorReportSummary=repeatedNoScorePrior))
+
+        self.assertEqual(repeatedNoScoreScore.score, baselineScore.score)
+        self.assertLess(repeatedNoScoreScore.confidence, baselineScore.confidence)
+        self.assertFalse(any(signal.points > 0 and "no-score" in signal.label.lower() for signal in repeatedNoScoreScore.signals))
+
 
 class BgIntelligenceRenderingTests(unittest.TestCase):
     def test_text_report_includes_full_release_sections(self):
@@ -302,6 +328,47 @@ class BgIntelligenceRenderingTests(unittest.TestCase):
 
         self.assertNotIn("Full text report", without_text.footer.text or "")
         self.assertIn("Full text report", with_text.footer.text or "")
+
+    def test_debug_timings_appear_in_text_report_and_overview(self):
+        report = _report(
+            debugTimingSummary={
+                "totalSeconds": 12.345,
+                "uiSeconds": 1.25,
+                "steps": [
+                    {"label": "Loading scan rules...", "seconds": 0.5},
+                    {"label": "Checking inventory...", "seconds": 4.25},
+                ],
+            }
+        )
+        score = scoring.scoreReport(report)
+
+        text = rendering.buildReportText(report, score=score, reportId=42)
+        embed = rendering.buildReportEmbed(report, score=score)
+
+        self.assertIn("Debug Timings", text)
+        self.assertIn("Total scan time", text)
+        self.assertIn("Progress UI latency", text)
+        self.assertIn("[Debug] Timings", [field.name for field in embed.fields])
+        self.assertTrue(any("Checking inventory" in field.value for field in embed.fields if field.name == "[Debug] Timings"))
+
+    def test_debug_section_embed_keeps_full_timing_list(self):
+        report = _report(
+            debugTimingSummary={
+                "totalSeconds": 48.5,
+                "steps": [
+                    {"label": f"Step {index}", "seconds": float(index)}
+                    for index in range(1, 35)
+                ],
+            }
+        )
+        score = scoring.scoreReport(report)
+
+        embed = rendering.buildPublicSectionEmbed(report, score=score, section="debug")
+        fieldText = "\n".join(field.value for field in embed.fields)
+
+        self.assertGreater(len(embed.fields), 1)
+        self.assertIn("Total scan time", fieldText)
+        self.assertIn("Step 34", fieldText)
 
     def test_overview_embed_matches_summary_layout(self):
         report = _report(
@@ -378,6 +445,124 @@ class BgIntelligenceRenderingTests(unittest.TestCase):
         self.assertIn("Items scanned", inventoryEmbed.fields[0].value)
         self.assertIn("Known current asset value", inventoryEmbed.fields[0].value)
 
+    def test_inventory_section_lists_flag_links_and_reasons(self):
+        report = _report(
+            inventorySummary={
+                "itemsScanned": 8,
+                "pagesScanned": 1,
+                "uniqueAssetCount": 4,
+                "uniqueGamepassCount": 0,
+                "knownValueRobux": 150,
+                "pricedAssetCount": 3,
+                "unpricedAssetCount": 1,
+                "complete": True,
+                "flaggedItemCount": 2,
+                "visualMatchedCount": 1,
+                "visualCandidateCount": 3,
+                "visualReferenceCount": 2,
+                "keywordMatchCount": 1,
+                "normalizedKeywordMatchCount": 0,
+                "fuzzyKeywordMatchCount": 0,
+                "suspiciousCreatorCount": 1,
+                "multiSignalMatchCount": 0,
+            },
+            flaggedItems=[
+                {
+                    "id": 200,
+                    "name": "Disputed Shirt",
+                    "itemType": "Shirt",
+                    "creatorId": 10,
+                    "creatorName": "Maker",
+                    "matchType": "keyword",
+                    "matchMode": "exact",
+                    "keyword": "soviet",
+                    "matchCount": 1,
+                },
+                {
+                    "id": 201,
+                    "name": "Copied Hat",
+                    "itemType": "Hat",
+                    "creatorId": 11,
+                    "creatorName": "Uploader",
+                    "matchType": "visual",
+                    "matchMode": "thumbnail_hash",
+                    "referenceItemId": 100,
+                    "matchCount": 1,
+                },
+            ],
+        )
+        score = scoring.scoreReport(report)
+
+        inventoryEmbed = rendering.buildPublicSectionEmbed(report, score=score, section="inventory")
+        fieldText = "\n".join(field.value for field in inventoryEmbed.fields)
+
+        self.assertIn("https://www.roblox.com/catalog/200", fieldText)
+        self.assertIn("item name matched keyword `soviet`", fieldText)
+        self.assertIn("https://www.roblox.com/catalog/201", fieldText)
+        self.assertIn("thumbnail similarity to [item 100](https://www.roblox.com/catalog/100)", fieldText)
+
+    def test_detection_summary_lists_inventory_match_reasons(self):
+        report = _report(
+            inventorySummary={
+                "itemsScanned": 8,
+                "pagesScanned": 1,
+                "uniqueAssetCount": 4,
+                "uniqueGamepassCount": 0,
+                "knownValueRobux": 150,
+                "pricedAssetCount": 3,
+                "unpricedAssetCount": 1,
+                "complete": True,
+                "flaggedItemCount": 3,
+                "exactItemMatchCount": 1,
+                "visualMatchedCount": 1,
+                "visualCandidateCount": 3,
+                "visualReferenceCount": 2,
+                "keywordMatchCount": 1,
+                "normalizedKeywordMatchCount": 0,
+                "fuzzyKeywordMatchCount": 0,
+                "suspiciousCreatorCount": 0,
+                "multiSignalMatchCount": 0,
+            },
+            flaggedItems=[
+                {
+                    "id": 200,
+                    "name": "Meru Shirt",
+                    "matchType": "keyword",
+                    "matchMode": "exact",
+                    "keyword": "meru",
+                    "matchCount": 1,
+                },
+                {
+                    "id": 201,
+                    "name": "Copied Hat",
+                    "matchType": "visual",
+                    "matchMode": "thumbnail_hash",
+                    "referenceItemId": 100,
+                    "referenceItemName": "Flagged Hat",
+                    "matchCount": 1,
+                },
+                {
+                    "id": 202,
+                    "name": "Known Bad Item",
+                    "matchType": "item",
+                    "matchMode": "exact",
+                    "matchCount": 1,
+                },
+            ],
+        )
+        score = scoring.scoreReport(report)
+
+        embed = rendering.buildReportEmbed(report, score=score)
+        detectionField = next(field for field in embed.fields if field.name == "[Scan] Detection Summary")
+
+        self.assertIn("Item summary:", detectionField.value)
+        self.assertIn("[Meru Shirt](https://www.roblox.com/catalog/200) - matched keyword `meru`", detectionField.value)
+        self.assertIn(
+            "[Copied Hat](https://www.roblox.com/catalog/201) - similar to [Flagged Hat](https://www.roblox.com/catalog/100)",
+            detectionField.value,
+        )
+        self.assertIn("[Known Bad Item](https://www.roblox.com/catalog/202) - previously flagged item", detectionField.value)
+
 
 class RobloxBadgeTimelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_badge_history_applies_cursor_boundary_award_dates(self):
@@ -419,6 +604,60 @@ class RobloxBadgeTimelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.error)
         self.assertEqual(result.badges[1]["awardedDate"], "2024-01-02T03:04:05Z")
         self.assertEqual(result.badges[1]["awardedDateSource"], "badge_history_next_cursor")
+
+    async def test_badge_history_uses_open_cloud_inventory_dates(self):
+        oldRequestJson = robloxBadges._requestJson
+        oldCacheGet = robloxBadges._cacheGet
+        oldCacheSet = robloxBadges._cacheSet
+        oldInventoryApiKey = robloxBadges._badgeInventoryApiKey
+        oldPopulateDetails = robloxBadges._populateBadgeHistoryDetails
+
+        async def fakeRequestJson(*args, **kwargs):
+            url = args[1] if len(args) > 1 else kwargs.get("url")
+            params = kwargs.get("params") or {}
+            if str(url).startswith("https://apis.roblox.com/cloud/v2/users/456/inventory-items"):
+                if params.get("pageToken") == "page-2":
+                    return 200, {
+                        "inventoryItems": [
+                            {
+                                "badgeDetails": {"badgeId": "20"},
+                                "addTime": "2024-01-03T00:00:00Z",
+                            }
+                        ]
+                    }
+                return 200, {
+                    "inventoryItems": [
+                        {
+                            "badgeDetails": {"badgeId": "10"},
+                            "addTime": "2024-01-02T03:04:05Z",
+                        }
+                    ],
+                    "nextPageToken": "page-2",
+                }
+            raise AssertionError(f"Unexpected URL {url!r}")
+
+        async def fakePopulateDetails(badges):
+            return None
+
+        try:
+            robloxBadges._requestJson = fakeRequestJson
+            robloxBadges._cacheGet = lambda *args, **kwargs: None
+            robloxBadges._cacheSet = lambda *args, **kwargs: None
+            robloxBadges._badgeInventoryApiKey = lambda: "token"
+            robloxBadges._populateBadgeHistoryDetails = fakePopulateDetails
+
+            result = await robloxBadges.fetchRobloxUserBadges(456, limit=10, maxPages=2)
+        finally:
+            robloxBadges._requestJson = oldRequestJson
+            robloxBadges._cacheGet = oldCacheGet
+            robloxBadges._cacheSet = oldCacheSet
+            robloxBadges._badgeInventoryApiKey = oldInventoryApiKey
+            robloxBadges._populateBadgeHistoryDetails = oldPopulateDetails
+
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.nextCursor)
+        self.assertEqual([badge["id"] for badge in result.badges], [20, 10])
+        self.assertEqual(result.badges[0]["awardedDateSource"], "open_cloud_inventory")
 
     async def test_badge_award_403_reports_roblox_unavailable(self):
         oldRequestJson = robloxBadges._requestJson
@@ -480,6 +719,45 @@ class RobloxBadgeTimelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Roblox award dates are currently unavailable", line)
         self.assertNotIn("0** dated", line)
 
+    def test_badge_graph_file_builds_from_open_cloud_award_dates(self):
+        report = _report(
+            badgeHistorySample=[
+                {
+                    "id": 10,
+                    "awardedDate": "2024-01-02T03:04:05Z",
+                    "awardedDateSource": "open_cloud_inventory",
+                },
+                {
+                    "id": 20,
+                    "awardedDate": "2024-01-03T00:00:00Z",
+                    "awardedDateSource": "open_cloud_inventory",
+                },
+            ]
+        )
+
+        graphFile = rendering.buildBadgeTimelineGraphFile(report)
+
+        self.assertIsNotNone(graphFile)
+        self.assertEqual(graphFile.filename, "bg-intel-badge-timeline.png")
+
+    def test_all_badges_have_award_dates_requires_every_badge_to_be_dated(self):
+        self.assertTrue(
+            service._allBadgesHaveAwardDates(
+                [
+                    {"id": 10, "awardedDate": "2024-01-02T03:04:05Z"},
+                    {"id": 20, "awardedDate": "2024-01-03T00:00:00Z"},
+                ]
+            )
+        )
+        self.assertFalse(
+            service._allBadgesHaveAwardDates(
+                [
+                    {"id": 10, "awardedDate": "2024-01-02T03:04:05Z"},
+                    {"id": 20},
+                ]
+            )
+        )
+
 
 class RobloxInventoryValueTests(unittest.TestCase):
     def test_inventory_value_excludes_self_created_assets(self):
@@ -521,19 +799,58 @@ class RobloxInventoryValueTests(unittest.TestCase):
         self.assertEqual(summary["selfCreatedRobuxExcluded"], 100)
 
 
+class RobloxAssetPriceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_price_lookup_caps_individual_fallback_after_batch(self):
+        oldBatchLookup = robloxAssets._fetchCatalogAssetPricesBatch
+        oldRequestJson = robloxAssets._requestJson
+        oldFallbackMax = config.robloxAssetPriceFallbackMaxAssets
+        requestedIds = []
+
+        async def fakeBatchLookup(assetIds, headers):
+            return {}, [int(assetId) for assetId in assetIds], "batch miss"
+
+        async def fakeRequestJson(method, url, **kwargs):
+            assetId = int(str(url).rstrip("/").split("/")[-2])
+            requestedIds.append(assetId)
+            return 200, {
+                "Name": f"Asset {assetId}",
+                "PriceInRobux": 10,
+                "Creator": {"Id": 99, "Name": "Creator", "CreatorType": "User"},
+                "AssetTypeId": 11,
+                "AssetType": "Shirt",
+            }
+
+        try:
+            config.robloxAssetPriceFallbackMaxAssets = 2
+            robloxAssets._fetchCatalogAssetPricesBatch = fakeBatchLookup
+            robloxAssets._requestJson = fakeRequestJson
+
+            prices, error = await robloxAssets.fetchCatalogAssetPrices([910001, 910002, 910003, 910004])
+        finally:
+            robloxAssets._fetchCatalogAssetPricesBatch = oldBatchLookup
+            robloxAssets._requestJson = oldRequestJson
+            config.robloxAssetPriceFallbackMaxAssets = oldFallbackMax
+
+        self.assertEqual(requestedIds, [910001, 910002])
+        self.assertEqual(sorted(prices.keys()), [910001, 910002])
+        self.assertIn("Skipped 2 individual asset price lookup", error or "")
+
+
 class RobloxInventoryVisualTests(unittest.IsolatedAsyncioTestCase):
     async def test_visual_hash_matching_requires_compatible_asset_types(self):
         oldHashLookup = robloxInventoryVisual.fetchRobloxAssetThumbnailHashes
         oldPriceLookup = robloxInventoryVisual.robloxAssets.fetchCatalogAssetPrices
         oldEnabled = config.bgIntelligenceInventoryVisualMatchingEnabled
         oldDistance = config.bgIntelligenceInventoryVisualHashDistanceMax
+        hashLookups = []
 
         async def fakeHashLookup(assetIds):
+            hashLookups.append([int(assetId) for assetId in assetIds])
             return {int(assetId): "0" * 16 for assetId in assetIds}, None
 
         async def fakePriceLookup(assetIds):
             details = {
-                100: {"assetTypeId": 11, "assetTypeName": "Shirt"},
+                100: {"name": "Flagged Shirt", "assetTypeId": 11, "assetTypeName": "Shirt"},
             }
             return {int(assetId): details[int(assetId)] for assetId in assetIds if int(assetId) in details}, None
 
@@ -572,12 +889,157 @@ class RobloxInventoryVisualTests(unittest.IsolatedAsyncioTestCase):
             config.bgIntelligenceInventoryVisualHashDistanceMax = oldDistance
 
         self.assertEqual(summary["matchedCount"], 1)
+        self.assertEqual(summary["candidateCount"], 2)
+        self.assertEqual(summary["comparedCandidateCount"], 1)
         self.assertGreaterEqual(summary["skippedTypeMismatchCount"], 1)
+        self.assertEqual(hashLookups, [[201]])
         self.assertNotIn(200, flaggedItemsById)
         self.assertEqual(flaggedItemsById[201]["matchType"], "visual")
+        self.assertEqual(flaggedItemsById[201]["referenceItemName"], "Flagged Shirt")
+
+    async def test_visual_hash_matching_rejects_shirt_vs_tshirt(self):
+        oldHashLookup = robloxInventoryVisual.fetchRobloxAssetThumbnailHashes
+        oldPriceLookup = robloxInventoryVisual.robloxAssets.fetchCatalogAssetPrices
+        oldEnabled = config.bgIntelligenceInventoryVisualMatchingEnabled
+        oldDistance = config.bgIntelligenceInventoryVisualHashDistanceMax
+        hashLookups = []
+
+        async def fakeHashLookup(assetIds):
+            hashLookups.append([int(assetId) for assetId in assetIds])
+            return {int(assetId): "0" * 16 for assetId in assetIds}, None
+
+        async def fakePriceLookup(assetIds):
+            details = {
+                100: {"assetTypeId": 2, "assetTypeName": "TShirt"},
+            }
+            return {int(assetId): details[int(assetId)] for assetId in assetIds if int(assetId) in details}, None
+
+        try:
+            config.bgIntelligenceInventoryVisualMatchingEnabled = True
+            config.bgIntelligenceInventoryVisualHashDistanceMax = 6
+            robloxInventoryVisual.fetchRobloxAssetThumbnailHashes = fakeHashLookup
+            robloxInventoryVisual.robloxAssets.fetchCatalogAssetPrices = fakePriceLookup
+
+            flaggedItemsById = {}
+            summary = await robloxInventoryVisual.applyInventoryVisualMatches(
+                flaggedItemsById=flaggedItemsById,
+                candidateItems=[
+                    {
+                        "id": 201,
+                        "name": "Black Green Shirt",
+                        "itemType": "Shirt",
+                        "assetTypeId": 11,
+                        "visualCategory": "classic_shirt",
+                    },
+                ],
+                referenceItemIds={100},
+                referenceHashes={100: "0" * 16},
+            )
+        finally:
+            robloxInventoryVisual.fetchRobloxAssetThumbnailHashes = oldHashLookup
+            robloxInventoryVisual.robloxAssets.fetchCatalogAssetPrices = oldPriceLookup
+            config.bgIntelligenceInventoryVisualMatchingEnabled = oldEnabled
+            config.bgIntelligenceInventoryVisualHashDistanceMax = oldDistance
+
+        self.assertEqual(summary["matchedCount"], 0)
+        self.assertEqual(summary["comparedCandidateCount"], 0)
+        self.assertGreaterEqual(summary["skippedTypeMismatchCount"], 1)
+        self.assertEqual(hashLookups, [])
+        self.assertEqual(flaggedItemsById, {})
+
+    async def test_visual_hash_matching_rejects_palette_mismatch(self):
+        oldSignatureLookup = robloxInventoryVisual.fetchRobloxAssetVisualSignatures
+        oldPriceLookup = robloxInventoryVisual.robloxAssets.fetchCatalogAssetPrices
+        oldEnabled = config.bgIntelligenceInventoryVisualMatchingEnabled
+        oldDistance = config.bgIntelligenceInventoryVisualHashDistanceMax
+        oldColorEnabled = config.bgIntelligenceInventoryVisualColorMatchingEnabled
+        oldColorDistance = config.bgIntelligenceInventoryVisualColorDistanceMax
+
+        redSignature = json.dumps(
+            {"v": 3, "bins": [1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "mode": "detailed"},
+            separators=(",", ":"),
+        )
+        blueSignature = json.dumps(
+            {"v": 3, "bins": [0, 0, 0, 0, 0, 0, 0, 1000, 0, 0, 0, 0, 0, 0, 0], "mode": "detailed"},
+            separators=(",", ":"),
+        )
+
+        async def fakeSignatureLookup(assetIds):
+            return {
+                int(assetId): {
+                    "thumbnailHash": "0" * 16,
+                    "colorSignature": blueSignature,
+                    "colorSignatureVersion": 3,
+                }
+                for assetId in assetIds
+            }, None
+
+        async def fakePriceLookup(assetIds):
+            details = {
+                100: {"name": "Flagged Shirt", "assetTypeId": 11, "assetTypeName": "Shirt"},
+            }
+            return {int(assetId): details[int(assetId)] for assetId in assetIds if int(assetId) in details}, None
+
+        try:
+            config.bgIntelligenceInventoryVisualMatchingEnabled = True
+            config.bgIntelligenceInventoryVisualHashDistanceMax = 3
+            config.bgIntelligenceInventoryVisualColorMatchingEnabled = True
+            config.bgIntelligenceInventoryVisualColorDistanceMax = 0.58
+            robloxInventoryVisual.fetchRobloxAssetVisualSignatures = fakeSignatureLookup
+            robloxInventoryVisual.robloxAssets.fetchCatalogAssetPrices = fakePriceLookup
+
+            flaggedItemsById = {}
+            summary = await robloxInventoryVisual.applyInventoryVisualMatches(
+                flaggedItemsById=flaggedItemsById,
+                candidateItems=[
+                    {
+                        "id": 201,
+                        "name": "Blue Shirt",
+                        "itemType": "Shirt",
+                        "assetTypeId": 11,
+                        "visualCategory": "classic_shirt",
+                    },
+                ],
+                referenceItemIds={100},
+                referenceHashes={100: "0" * 16},
+                referenceColorSignatures={100: redSignature},
+            )
+        finally:
+            robloxInventoryVisual.fetchRobloxAssetVisualSignatures = oldSignatureLookup
+            robloxInventoryVisual.robloxAssets.fetchCatalogAssetPrices = oldPriceLookup
+            config.bgIntelligenceInventoryVisualMatchingEnabled = oldEnabled
+            config.bgIntelligenceInventoryVisualHashDistanceMax = oldDistance
+            config.bgIntelligenceInventoryVisualColorMatchingEnabled = oldColorEnabled
+            config.bgIntelligenceInventoryVisualColorDistanceMax = oldColorDistance
+
+        self.assertEqual(summary["matchedCount"], 0)
+        self.assertEqual(summary["comparedCandidateCount"], 1)
+        self.assertEqual(summary["skippedColorMismatchCount"], 1)
+        self.assertEqual(flaggedItemsById, {})
 
 
 class BgIntelligenceViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inventory_section_shows_dispute_button_only_when_flags_exist(self):
+        report = _report(
+            flaggedItems=[
+                {
+                    "id": 200,
+                    "name": "Disputed Shirt",
+                    "matchType": "keyword",
+                    "matchMode": "exact",
+                    "keyword": "soviet",
+                }
+            ]
+        )
+        score = scoring.scoreReport(report)
+        view = BgIntelDetailsView(ownerId=1, report=report, riskScore=score, reportId=5)
+
+        view._rebuildControls("overview")
+        self.assertFalse(any(getattr(child, "label", "") == "Dispute Flag" for child in view.children))
+
+        view._rebuildControls("inventory")
+        self.assertTrue(any(getattr(child, "label", "") == "Dispute Flag" for child in view.children))
+
     async def test_rerun_requests_username_for_discord_scan_without_roblox_identity(self):
         report = _report(robloxUserId=None, robloxUsername=None, roverError="No Roblox account linked via RoVer.")
         score = scoring.scoreReport(report)
@@ -594,16 +1056,129 @@ class BgIntelligenceViewTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(view._needsRobloxUsernameForRerun())
 
+    async def test_standard_view_exposes_report_button_without_auto_attachment(self):
+        report = _report()
+        score = scoring.scoreReport(report)
+
+        view = BgIntelDetailsView(ownerId=1, report=report, riskScore=score, reportId=0)
+        _, files = view._buildPublicPayload("overview")
+        labels = {getattr(child, "label", None) for child in view.children}
+
+        self.assertFalse(any(file.filename.endswith(".txt") for file in files))
+        self.assertIn("Full Text Report", labels)
+
+    async def test_debug_view_forces_text_report_attachment(self):
+        report = _report(
+            debugTimingSummary={
+                "totalSeconds": 5.0,
+                "steps": [{"label": "Scanning...", "seconds": 5.0}],
+            }
+        )
+        score = scoring.scoreReport(report)
+
+        view = BgIntelDetailsView(
+            ownerId=1,
+            report=report,
+            riskScore=score,
+            reportId=0,
+            includeTextReport=False,
+            debugMode=True,
+        )
+        _, files = view._buildPublicPayload("overview")
+
+        self.assertTrue(any(file.filename.endswith(".txt") for file in files))
+
+    async def test_debug_view_exposes_debug_dropdown_section(self):
+        report = _report(
+            debugTimingSummary={
+                "totalSeconds": 5.0,
+                "steps": [{"label": "Scanning...", "seconds": 5.0}],
+            }
+        )
+        score = scoring.scoreReport(report)
+
+        view = BgIntelDetailsView(
+            ownerId=1,
+            report=report,
+            riskScore=score,
+            reportId=0,
+            debugMode=True,
+        )
+        select = next(child for child in view.children if isinstance(child, discord.ui.Select))
+
+        self.assertIn("debug", [option.value for option in select.options])
+
+
+class BgIntelligenceCommandTests(unittest.TestCase):
+    def test_parse_discord_id_accepts_mentions_and_plain_ids(self):
+        self.assertEqual(BgIntelligenceCog._parseDiscordId("123456789012345678"), 123456789012345678)
+        self.assertEqual(BgIntelligenceCog._parseDiscordId("<@123456789012345678>"), 123456789012345678)
+        self.assertEqual(BgIntelligenceCog._parseDiscordId("<@!123456789012345678>"), 123456789012345678)
+        self.assertIsNone(BgIntelligenceCog._parseDiscordId("TargetUser"))
+
+
+class BgIntelProgressRelayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_relay_throttles_non_forced_updates(self):
+        sent: list[str] = []
+        clock = {"value": 10.0}
+
+        async def updater(status: str) -> bool:
+            sent.append(status)
+            return True
+
+        relay = BgIntelProgressRelay(
+            updater=updater,
+            minIntervalSec=1.0,
+            nowFactory=lambda: clock["value"],
+        )
+        await relay.update("Checking Discord membership and main-server lookup...")
+        clock["value"] = 10.2
+        await relay.update("Loading scan rules...")
+        clock["value"] = 10.4
+        await relay.update("Checking RoVer for the linked Roblox account...")
+        clock["value"] = 10.6
+        await relay.update("Reviewing inventory and item values [scanning inventory pages]...")
+
+        self.assertEqual(
+            sent,
+            [
+                "Checking Discord membership and main-server lookup...",
+                "Reviewing inventory and item values [scanning inventory pages]...",
+            ],
+        )
 
 class CharacterAltMatcherTests(unittest.TestCase):
+    def test_exact_same_username_is_not_alt_similarity_evidence(self):
+        reason, strength, ratio = service._nameSimilarityReason(
+            "PotaterGaming",
+            "PotaterGaming",
+            altWords=[],
+            fuzzyEnabled=True,
+            fuzzyMinSimilarity=0.9,
+            fuzzyMinLength=5,
+        )
+
+        self.assertIsNone(reason)
+        self.assertEqual(strength, "weak")
+        self.assertIsNone(ratio)
+
     def test_alt_marker_suffix_matches_known_username(self):
         reason = characters.username_alt_match_reason("KnownUserBackup", "KnownUser")
 
         self.assertIsNotNone(reason)
         self.assertIn("alt", reason or "")
 
+    def test_alt_marker_prefix_with_leetspeak_core_matches_known_username(self):
+        reason = characters.username_alt_match_reason("BackupKn0wnUser", "KnownUser")
+
+        self.assertIsNotNone(reason)
+        self.assertIn("alt", reason or "")
+
     def test_alternate_characters_match_known_username(self):
         self.assertTrue(characters.looks_like_username_alt("Kn0wn_User", "KnownUser"))
+
+    def test_trailing_digits_match_known_username(self):
+        self.assertTrue(characters.looks_like_username_alt("KnownUser123", "KnownUser"))
 
     def test_arbitrary_contains_does_not_match(self):
         self.assertFalse(characters.looks_like_username_alt("RandomKnownUserThing", "KnownUser"))

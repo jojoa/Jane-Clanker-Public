@@ -17,6 +17,9 @@ async def safeRefreshInteractionMessage(
             return
         except (discord.NotFound, discord.HTTPException, AttributeError, TypeError):
             pass
+        except Exception as exc:
+            if not interactionRuntime._isSafeTransportFailure(exc):
+                raise
         if interaction.message is not None:
             await interactionRuntime.safeMessageEdit(interaction.message, **kwargs)
         return
@@ -24,6 +27,11 @@ async def safeRefreshInteractionMessage(
     try:
         await interaction.response.edit_message(**kwargs)
     except (discord.NotFound, discord.HTTPException):
+        if interaction.message is not None:
+            await interactionRuntime.safeMessageEdit(interaction.message, **kwargs)
+    except Exception as exc:
+        if not interactionRuntime._isSafeTransportFailure(exc):
+            raise
         if interaction.message is not None:
             await interactionRuntime.safeMessageEdit(interaction.message, **kwargs)
 

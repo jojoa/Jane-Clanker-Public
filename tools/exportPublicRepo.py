@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import fnmatch
+import json
 import os
 import re
 import shutil
@@ -82,13 +83,16 @@ _ALLOWED_PRIVATE_PLUGIN_SCAFFOLD_PATHS = {
 }
 _PRIVATE_ONLY_PATH_PREFIXES = {
     "cogs/operations/orbatCog.py",
+    "cogs/operations/linkHubCog.py",
     "cogs/operations/runtimeControlCog.py",
     "cogs/operations/serverSafetyCog.py",
+    "features/operations/linkHub",
     "features/operations/serverSafety",
     "runtime/configMerge.py",
     "runtime/gitUpdate.py",
     "runtime/processControl.py",
     "runtime/restartStatus.py",
+    "tests/test_link_hub_service.py",
 }
 _SCAN_PATTERNS = (
     ("discord_webhook", re.compile(r"https://(?:ptb\.)?discord(?:app)?\.com/api/webhooks/\S+")),
@@ -96,6 +100,7 @@ _SCAN_PATTERNS = (
     ("service_account_private_key", re.compile(r'"private_key"\s*:\s*"-----BEGIN PRIVATE KEY-----')),
     ("github_token", re.compile(r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")),
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z\-_]{20,}\b")),
+    ("google_form_url", re.compile(r"https://(?:docs\.google\.com/forms|forms\.gle)/\S+")),
     (
         "literal_secret_assignment",
         re.compile(
@@ -107,12 +112,21 @@ _GENERIC_CONFIG_REPLACEMENTS = {
     "enablePrivateExtensions": "False",
     "enableDestructiveCommands": "False",
     "destructiveCommandsDryRun": "True",
+    "disableGitPullOnManualRestart": "True",
     "allowGitPullOnManualRestart": "False",
     "autoGitUpdateEnabled": "False",
     "serverIdTesting": "0",
     "serverSafetyQuarantineThreshold": "5",
     "serverSafetyQuarantineWindowSec": "30",
 }
+_CONFIG_SANITIZE_PATHS = (
+    "config.py",
+    "settings/env.py",
+    "settings/core.py",
+    "settings/staff.py",
+    "settings/operations.py",
+    "settings/community.py",
+)
 
 
 @dataclass
@@ -268,38 +282,89 @@ def _clearTopLevelIdLists(source: str) -> str:
     return "".join(lines)
 
 
+def _iterConfigSanitizePaths(targetRoot: Path) -> list[Path]:
+    return [
+        targetRoot / relPath
+        for relPath in _CONFIG_SANITIZE_PATHS
+        if (targetRoot / relPath).exists()
+    ]
+
+
 def _sanitizeExportedConfig(targetRoot: Path) -> None:
-    configPath = targetRoot / "config.py"
-    if not configPath.exists():
+    for configPath in _iterConfigSanitizePaths(targetRoot):
+        source = configPath.read_text(encoding="utf-8")
+        for envVar in ("BGC_SPREADSHEET_TEMPLATE_ID", "BGC_SPREADSHEET_FOLDER_ID"):
+            source = re.sub(
+                rf'("{re.escape(envVar)}",\s*\n\s*)"(?:[^"\\]|\\.)*"',
+                rf'\1""',
+                source,
+            )
+        source = re.sub(
+            r'(?m)^load_dotenv\(Path\(__file__\)\.resolve\(\)\.parent / "localOnly" / "credentials" / "jane-runtime-secrets\.env", override=True\)\n',
+            "",
+            source,
+        )
+        source = re.sub(
+            r'(?m)^load_dotenv\(_REPO_ROOT / "localOnly" / "credentials" / "jane-runtime-secrets\.env", override=True\)\n',
+            "",
+            source,
+        )
+        if "Path(" not in source:
+            source = re.sub(r"(?m)^from pathlib import Path\n", "", source)
+        source = _clearTopLevelIdLists(source)
+        source = re.sub(
+            r"(?m)^([A-Za-z_][A-Za-z0-9_]*(?:SpreadsheetId|SheetId))\s*=\s*(?:r?\"[^\"]*\"|r?'[^']*'|\d+)",
+            lambda match: f'{match.group(1)} = ""',
+            source,
+        )
+        source = re.sub(r'("spreadsheetId"\s*:\s*)"(.*?)"', r'\1""', source)
+        source = re.sub(r'("sheetId"\s*:\s*)"(.*?)"', r'\1""', source)
+        source = re.sub(
+            r"(?m)^([A-Za-z_][A-Za-z0-9_]*Id)\s*=\s*(?:r?\"[^\"]*\"|r?'[^']*'|\d+)",
+            lambda match: match.group(0)
+            if match.group(1).endswith(("SpreadsheetId", "SheetId"))
+            else f"{match.group(1)} = 0",
+            source,
+        )
+        for name, replacement in _GENERIC_CONFIG_REPLACEMENTS.items():
+            source = re.sub(
+                rf"(?m)^({re.escape(name)})\s*=\s*.+$",
+                lambda match: f"{match.group(1)} = {replacement}",
+                source,
+            )
+        configPath.write_text(source, encoding="utf-8")
+
+
+def _sanitizeApplicationConfig(targetRoot: Path) -> None:
+    divisionsPath = targetRoot / "configData" / "divisions.json"
+    if not divisionsPath.exists():
         return
 
-    source = configPath.read_text(encoding="utf-8")
-    for envVar in ("BGC_SPREADSHEET_TEMPLATE_ID", "BGC_SPREADSHEET_FOLDER_ID"):
-        source = re.sub(
-            rf'("{re.escape(envVar)}",\s*\n\s*)"(?:[^"\\]|\\.)*"',
-            rf'\1""',
-            source,
+    try:
+        payload = json.loads(divisionsPath.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+
+    changed = False
+    for division in list(payload.get("divisions") or []):
+        if not isinstance(division, dict):
+            continue
+        for question in list(division.get("questions") or []):
+            if not isinstance(question, dict):
+                continue
+            link = str(question.get("link") or "").strip()
+            if not link:
+                continue
+            if "docs.google.com/forms" not in link and "forms.gle/" not in link:
+                continue
+            question["link"] = ""
+            changed = True
+
+    if changed:
+        divisionsPath.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
         )
-    source = _clearTopLevelIdLists(source)
-    source = re.sub(
-        r"(?m)^([A-Za-z_][A-Za-z0-9_]*(?:SpreadsheetId|SheetId))\s*=\s*(?:r?\"[^\"]*\"|r?'[^']*'|\d+)",
-        lambda match: f'{match.group(1)} = ""',
-        source,
-    )
-    source = re.sub(r'("spreadsheetId"\s*:\s*)"(.*?)"', r'\1""', source)
-    source = re.sub(r'("sheetId"\s*:\s*)"(.*?)"', r'\1""', source)
-    source = re.sub(
-        r"(?m)^([A-Za-z_][A-Za-z0-9_]*Id)\s*=\s*(?:r?\"[^\"]*\"|r?'[^']*'|\d+)",
-        lambda match: f"{match.group(1)} = 0",
-        source,
-    )
-    for name, replacement in _GENERIC_CONFIG_REPLACEMENTS.items():
-        source = re.sub(
-            rf"(?m)^({re.escape(name)})\s*=\s*.+$",
-            lambda match: f"{match.group(1)} = {replacement}",
-            source,
-        )
-    configPath.write_text(source, encoding="utf-8")
 
 
 
@@ -347,7 +412,7 @@ os.environ["JANE_GAMBLING_API_TOKEN"] = "public-export-smoke-token"
 os.environ["JANE_ENABLE_PRIVATE_EXTENSIONS"] = "0"
 os.environ["ENABLE_DESTRUCTIVE_COMMANDS"] = "0"
 os.environ["DESTRUCTIVE_COMMANDS_DRY_RUN"] = "1"
-os.environ["JANE_ALLOW_GIT_PULL_ON_RESTART"] = "0"
+os.environ["JANE_DISABLE_GIT_PULL_ON_RESTART"] = "1"
 os.environ["JANE_ENABLE_AUTO_GIT_UPDATE"] = "0"
 
 moduleNames = [
@@ -393,7 +458,7 @@ print("Import smoke test passed.")
     env["JANE_ENABLE_PRIVATE_EXTENSIONS"] = "0"
     env["ENABLE_DESTRUCTIVE_COMMANDS"] = "0"
     env["DESTRUCTIVE_COMMANDS_DRY_RUN"] = "1"
-    env["JANE_ALLOW_GIT_PULL_ON_RESTART"] = "0"
+    env["JANE_DISABLE_GIT_PULL_ON_RESTART"] = "1"
     env["JANE_ENABLE_AUTO_GIT_UPDATE"] = "0"
     importResult = subprocess.run(
         [sys.executable, "-c", importScript, str(targetRoot)],
@@ -460,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
     _copyTree(REPO_ROOT, targetRoot, stats)
     _writePrivateScaffoldFiles(targetRoot)
     _sanitizeExportedConfig(targetRoot)
+    _sanitizeApplicationConfig(targetRoot)
     findings = _scanForSecrets(targetRoot)
 
     print(f"Exported to: {targetRoot}")

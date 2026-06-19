@@ -88,6 +88,64 @@ class RobloxAutoAcceptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(helper.await_args.kwargs["groupId"], 999001)
         self.assertEqual(helper.await_args.kwargs["groupUrl"], "https://www.roblox.com/groups/999001")
 
+    async def test_apply_recruitment_orientation_bonus_logs_sheet_change(self) -> None:
+        dmUser = AsyncMock(return_value=True)
+
+        with (
+            patch.object(postActions.config, "recruitmentAutoDetectOrientation", True),
+            patch.object(postActions.config, "recruitmentPointsOrientationBonus", 5),
+            patch.object(
+                postActions.recruitmentService,
+                "applyOrientationBonusForRecruit",
+                AsyncMock(
+                    return_value=[
+                        {
+                            "submission": {
+                                "submitterId": 101,
+                                "channelId": 202,
+                                "messageId": 303,
+                            },
+                            "bonusCredited": True,
+                        }
+                    ]
+                ),
+            ),
+            patch.object(postActions, "updateRecruitmentSubmissionMessage", AsyncMock()),
+            patch.object(postActions, "dmRecruiterBonus", AsyncMock()),
+            patch.object(
+                postActions.recruitmentOutputs,
+                "syncApprovedLogEntriesToSheet",
+                AsyncMock(return_value={"updatedRows": 1}),
+            ),
+            patch.object(
+                postActions.recruitmentOutputs,
+                "sendRecruitmentSheetChangeLog",
+                AsyncMock(),
+            ) as auditMock,
+        ):
+            await postActions.applyRecruitmentOrientationBonus(
+                bot=SimpleNamespace(),
+                recruitUserId=404,
+                getChannel=AsyncMock(),
+                dmUser=dmUser,
+            )
+
+        auditMock.assert_awaited_once()
+        self.assertEqual(
+            auditMock.await_args.kwargs["authorizedBy"],
+            "orientation auto bonus",
+        )
+        self.assertEqual(
+            auditMock.await_args.kwargs["requestedBy"],
+            "orientation workflow",
+        )
+        self.assertEqual(
+            auditMock.await_args.kwargs["change"],
+            "Updated Recruitment ORBAT from orientation auto bonus.",
+        )
+        self.assertIn("<@404>", auditMock.await_args.kwargs["details"])
+        self.assertIn("<@101>", auditMock.await_args.kwargs["details"])
+
 
 if __name__ == "__main__":
     unittest.main()

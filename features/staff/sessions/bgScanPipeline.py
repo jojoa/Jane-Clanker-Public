@@ -251,15 +251,26 @@ async def scanRobloxInventoryForAttendee(
         return True
 
     maxPages = int(getattr(config, "robloxInventoryScanMaxPages", 5))
-    visualReferenceHashes = await flagService.getValidatedItemVisualHashes(
+    visualReferences = await flagService.getValidatedItemVisualReferences(
         ensureSynced=True,
     )
+    visualReferenceHashes = {
+        int(assetId): str(details.get("thumbnailHash") or "").strip()
+        for assetId, details in visualReferences.items()
+        if str(details.get("thumbnailHash") or "").strip()
+    }
+    visualReferenceColorSignatures = {
+        int(assetId): str(details.get("colorSignature") or "").strip()
+        for assetId, details in visualReferences.items()
+        if str(details.get("colorSignature") or "").strip()
+    }
     result = await robloxInventory.fetchRobloxInventory(
         robloxUserId,
         flagItemIds,
         targetCreatorIds=flagCreatorIds,
         targetKeywords=itemKeywords,
         visualReferenceHashes=visualReferenceHashes,
+        visualReferenceColorSignatures=visualReferenceColorSignatures,
         maxPages=maxPages,
     )
     if result.error:

@@ -29,6 +29,17 @@ def _fallbackRobloxGroupUrl(groupId: int) -> str:
     return "https://www.roblox.com/communities/"
 
 
+def _mentionList(userIds: list[int], *, limit: int = 6) -> str:
+    mentions = [f"<@{int(userId)}>" for userId in userIds if int(userId or 0) > 0]
+    if not mentions:
+        return "none"
+    visible = mentions[: max(1, int(limit or 1))]
+    overflow = len(mentions) - len(visible)
+    if overflow > 0:
+        visible.append(f"... and {overflow} more")
+    return ", ".join(visible)
+
+
 async def updateRecruitmentSubmissionMessage(
     bot: discord.Client,
     submission: dict,
@@ -99,6 +110,7 @@ async def applyRecruitmentOrientationBonus(
         return
 
     sheetEntries: list[recruitmentOutputs.SheetLogEntry] = []
+    recruiterUserIds: list[int] = []
     for item in updates:
         submission = item["submission"]
         await updateRecruitmentSubmissionMessage(
@@ -108,6 +120,7 @@ async def applyRecruitmentOrientationBonus(
         )
         if item.get("bonusCredited"):
             submitterId = int(submission["submitterId"])
+            recruiterUserIds.append(submitterId)
             sheetEntries.append(
                 recruitmentOutputs.SheetLogEntry(
                     discordUserId=submitterId,
@@ -123,11 +136,21 @@ async def applyRecruitmentOrientationBonus(
                 dmUser=dmUser,
             )
     if sheetEntries:
-        await recruitmentOutputs.syncApprovedLogEntriesToSheet(
+        syncResult = await recruitmentOutputs.syncApprovedLogEntriesToSheet(
             sheetEntries,
             organizeAfter=True,
             botClient=bot,
         )
+        if int(syncResult.get("updatedRows") or 0) > 0:
+            await recruitmentOutputs.sendRecruitmentSheetChangeLog(
+                bot,
+                authorizedBy="orientation auto bonus",
+                requestedBy="orientation workflow",
+                change="Updated Recruitment ORBAT from orientation auto bonus.",
+                details=(
+                    f"Recruit: <@{int(recruitUserId)}> | Recruiters: {_mentionList(recruiterUserIds)} | Bonus each: +{int(bonus)}"
+                ),
+            )
 
 
 async def reconcileRecruitmentOrientationBonusesForSession(
@@ -226,15 +249,14 @@ async def attemptRobloxAutoAcceptForGroup(
         status = "NO_ROVER" if lookup.error == "No Roblox account linked via RoVer." else "ERROR"
         await sessionService.setRobloxStatus(sessionId, targetUserId, None, status, lookup.error)
 
-        verifyUrl = getattr(config, "roverVerifyUrl", "https://rover.link/verify")
         dmMessage = (
-            "We couldn't find your Roblox account via RoVer. "
-            f"Please verify your Discord here: {verifyUrl} "
+            "We couldn't find your linked Roblox account. "
+            "Please run `/verify` in Discord "
             f"then request to join the group: {normalizedGroupUrl}"
         )
         dmOk = await dmUser(bot, targetUserId, dmMessage)
         modNote = (
-            f"Roblox auto-accept failed for <@{targetUserId}>: no RoVer link. "
+            f"Roblox auto-accept failed for <@{targetUserId}>: no linked Roblox account. "
             f"{'DM sent.' if dmOk else 'DM failed.'}"
         )
         await notifyMods(bot, modNote)

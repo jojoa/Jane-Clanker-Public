@@ -26,6 +26,13 @@ class RobloxGroupsResult:
 
 
 @dataclass
+class RobloxGroupRolesResult:
+    roles: list[dict]
+    status: int
+    error: Optional[str] = None
+
+
+@dataclass
 class RobloxInventoryResult:
     items: list[dict]
     status: int

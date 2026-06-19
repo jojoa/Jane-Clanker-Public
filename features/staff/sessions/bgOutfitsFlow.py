@@ -48,7 +48,7 @@ async def sendBgOutfitsForTarget(
     if status == "NO_ROVER":
         await _dep("safeInteractionReply")(
             interaction,
-            content="No RoVer link found for this attendee. Ask them to verify their Roblox account.",
+            content="No linked Roblox account found for this attendee. Ask them to run `/verify`.",
             ephemeral=True,
         )
         return

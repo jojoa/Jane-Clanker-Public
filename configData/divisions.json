@@ -29,7 +29,7 @@
           "label": "Google Forms Link:",
           "required": true,
           "style": "form",
-          "link": "https://docs.google.com/forms/d/e/1FAIpQLSfU2cwMAbyw4OLrUOo-Ex4iknMTz_c0qdLYzu-3b8G9LmOEdw/viewform?usp=dialog"
+          "link": ""
         }
       ],
       "requiresProof": false,
@@ -58,7 +58,7 @@
           "label": "Google Forms Link:",
           "required": true,
           "style": "form",
-          "link": "https://docs.google.com/forms/d/e/1FAIpQLSeyFmukgKnwWWXYvvaBENkcgIkFtyLC7Bxsqbimeq3maiLyjw/viewform?usp=dialog"
+          "link": ""
         }
       ],
       "requiresProof": false,

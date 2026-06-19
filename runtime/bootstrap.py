@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import importlib
+from asyncio import AbstractEventLoop
 from datetime import datetime, timezone
 from typing import Any
 
 import discord
 
+from runtime import backups as runtimeBackups
 from runtime import orgProfiles
 
 log = logging.getLogger(__name__)
@@ -48,6 +51,7 @@ class BootstrapCoordinator:
 
         self.startupGreetingSent = False
         self.readyCommandSyncCompleted = False
+        self._guildGlobalCopyPrimedIds: set[int] = set()
 
     @staticmethod
     def _parseIsoDatetime(value: str | None) -> datetime | None:
@@ -73,6 +77,17 @@ class BootstrapCoordinator:
             return True
         return int(guildId) in allowedGuildIds
 
+    def _primeGuildCommandSet(self, guild: discord.abc.Snowflake, *, copyGlobals: bool) -> None:
+        guildId = int(getattr(guild, "id", 0) or 0)
+        if guildId <= 0:
+            return
+        if not copyGlobals or guildId in self._guildGlobalCopyPrimedIds:
+            return
+        # Preserve guild-scoped command registrations from individual cogs
+        # and only layer the current global commands on top for guild sync.
+        self.botClient.tree.copy_global_to(guild=guild)
+        self._guildGlobalCopyPrimedIds.add(guildId)
+
     async def syncCommandsOnReady(self) -> None:
         if self.readyCommandSyncCompleted:
             return
@@ -86,6 +101,7 @@ class BootstrapCoordinator:
             return
 
         guildStatuses: dict[str, str] = {}
+        hadFailures = False
         registeredCommands = self.botClient.tree.get_commands(guild=None, type=discord.AppCommandType.chat_input)
         if not registeredCommands:
             log.warning(
@@ -102,30 +118,51 @@ class BootstrapCoordinator:
         if syncGuildsOnReady:
             for guild in self.botClient.guilds:
                 guildLabel = f"{guild.name} ({guild.id})"
-                try:
-                    if copyGlobalsToGuildOnReady:
-                        self.botClient.tree.copy_global_to(guild=guild)
-                    syncedGuild = await self.botClient.tree.sync(guild=guild)
-                    if self._isGuildAllowedForCommands(int(guild.id)):
-                        guildStatuses[guildLabel] = f"{len(syncedGuild)} command(s)"
-                    else:
-                        guildStatuses[guildLabel] = "Server Not Recognized"
-                except Exception as exc:
-                    guildStatuses[guildLabel] = f"FAILED: {exc.__class__.__name__}"
-                    log.exception(
-                        "Guild command sync failed for guild %s (%s).",
-                        guild.id,
-                        guild.name,
-                    )
+                if not self._isGuildAllowedForCommands(int(guild.id)):
+                    guildStatuses[guildLabel] = "Skipped - not in allowedCommandGuildIds"
+                    continue
+                syncedGuild = None
+                lastGuildError: Exception | None = None
+                for attempt in range(1, 3):
+                    try:
+                        self._primeGuildCommandSet(
+                            guild,
+                            copyGlobals=copyGlobalsToGuildOnReady,
+                        )
+                        syncedGuild = await self.botClient.tree.sync(guild=guild)
+                        lastGuildError = None
+                        break
+                    except Exception as exc:
+                        lastGuildError = exc
+                        log.exception(
+                            "Guild command sync attempt %s failed for guild %s (%s).",
+                            attempt,
+                            guild.id,
+                            guild.name,
+                        )
+                if syncedGuild is not None:
+                    guildStatuses[guildLabel] = f"{len(syncedGuild)} command(s)"
+                else:
+                    hadFailures = True
+                    guildStatuses[guildLabel] = f"FAILED: {lastGuildError.__class__.__name__ if lastGuildError is not None else 'Unknown'}"
 
         globalCountText = "skipped"
         if syncGlobalOnReady:
-            try:
-                syncedGlobal = await self.botClient.tree.sync()
+            syncedGlobal = None
+            lastGlobalError: Exception | None = None
+            for attempt in range(1, 3):
+                try:
+                    syncedGlobal = await self.botClient.tree.sync()
+                    lastGlobalError = None
+                    break
+                except Exception as exc:
+                    lastGlobalError = exc
+                    log.exception("Global command sync attempt %s (on_ready) failed.", attempt)
+            if syncedGlobal is not None:
                 globalCountText = str(len(syncedGlobal))
-            except Exception as exc:
-                globalCountText = f"FAILED: {exc.__class__.__name__}"
-                log.exception("Global command sync (on_ready) failed.")
+            else:
+                hadFailures = True
+                globalCountText = f"FAILED: {lastGlobalError.__class__.__name__ if lastGlobalError is not None else 'Unknown'}"
 
         guildLines = (
             "\n".join(f"- {guildName}: {status}" for guildName, status in guildStatuses.items())
@@ -138,10 +175,24 @@ class BootstrapCoordinator:
             globalCountText,
         )
         self._logUserVisibleCommandNamingSanity()
+        if hadFailures:
+            log.warning("Command sync had failures. Jane will retry on the next ready event.")
+            return
         self.readyCommandSyncCompleted = True
 
     async def setupHook(self) -> None:
         await self.initDb()
+        if bool(getattr(self.config, "dbRuntimeSnapshotOnStartup", True)):
+            try:
+                capture = await runtimeBackups.captureRuntimeDbState(self.config, label="startup")
+                log.info(
+                    "Runtime DB startup snapshot captured: snapshot=%s report=%s%s",
+                    capture.get("snapshotPath") or "none",
+                    capture.get("reportPath") or "none",
+                    f" error={capture.get('snapshotError')}" if capture.get("snapshotError") else "",
+                )
+            except Exception:
+                log.exception("Failed to capture runtime DB startup snapshot.")
         try:
             multiRegistry = self.loadMultiRegistry()
             log.info(

@@ -452,6 +452,12 @@ def _permissionSimulatorGuildAllowed(router: Any, guildId: int) -> bool:
 
 def _likelyCommandAccess(router: Any, member: discord.Member, commandPath: str) -> str:
     path = str(commandPath or "").strip().lower()
+    if path.startswith("/best-of"):
+        roleIds = set(router.permissions.normalizeRoleIds(getattr(router.config, "bestOfCommandRoleIds", [])))
+        hasRole = any(int(role.id) in roleIds for role in member.roles)
+        if member.guild_permissions.administrator or hasRole:
+            return "Likely allowed."
+        return "Likely denied (missing administrator permission or Best Of command role)."
     if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
         return "Likely allowed (admin/manage-server bypass)."
     if path.startswith("/orientation"):
@@ -471,7 +477,7 @@ def _likelyCommandAccess(router: Any, member: discord.Member, commandPath: str) 
         hr = int(getattr(router.config, "highRankRoleId", 0) or 0)
         hasRole = any(int(role.id) in {mr, hr} for role in member.roles if int(role.id) > 0)
         return "Likely allowed." if hasRole else "Likely denied (missing MR/HR role)."
-    if path.startswith("/archive") or path.startswith("/best-of") or path.startswith("/jail") or path.startswith("/unjail"):
+    if path.startswith("/archive") or path.startswith("/jail") or path.startswith("/unjail"):
         return "Likely denied (admin/manage-server required)."
     return "Permission depends on command-specific checks."
 

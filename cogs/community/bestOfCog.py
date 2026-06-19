@@ -148,6 +148,26 @@ def _rolePrioritySpecs() -> list[dict[str, object]]:
     ]
 
 
+def _bestOfCommandRoleIds() -> list[int]:
+    out: list[int] = []
+    for raw in getattr(config, "bestOfCommandRoleIds", []) or []:
+        parsed = _toPositiveInt(raw)
+        if parsed > 0 and parsed not in out:
+            out.append(parsed)
+    return out
+
+
+def _hasBestOfCommandPermission(member: discord.Member) -> bool:
+    return runtimePermissions.hasAdministrator(member) or runtimePermissions.hasAnyRole(
+        member,
+        _bestOfCommandRoleIds(),
+    )
+
+
+def _bestOfCommandCheck(interaction: discord.Interaction) -> bool:
+    return isinstance(interaction.user, discord.Member) and _hasBestOfCommandPermission(interaction.user)
+
+
 def _priorityLegendText() -> str:
     return "Former MR -> MR -> Former HR -> HR -> Former ANROCOM -> Command Staff -> ANROCOM"
 
@@ -734,6 +754,8 @@ class BestOfCog(commands.Cog):
         return True
 
     async def _runBestOfFinalizeLoop(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(5)
         while True:
             try:
                 await self._runBestOfFinalizeTick()
@@ -1232,8 +1254,8 @@ class BestOfCog(commands.Cog):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await self._safeEphemeral(interaction, "This command can only be used in a server.")
             return
-        if not runtimePermissions.hasAdministrator(interaction.user):
-            await self._safeEphemeral(interaction, "Only administrators can close this poll.")
+        if not _hasBestOfCommandPermission(interaction.user):
+            await self._safeEphemeral(interaction, "Only administrators or Best Of command roles can close this poll.")
             return
 
         pollRow = await bestOfService.getBestOfPoll(int(pollId))
@@ -1258,7 +1280,7 @@ class BestOfCog(commands.Cog):
         selected_lrs="Optional mentions or user IDs for selected LR candidates.",
     )
     @app_commands.rename(selected_lrs="selected-lrs")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.check(_bestOfCommandCheck)
     async def bestOf(
         self,
         interaction: discord.Interaction,

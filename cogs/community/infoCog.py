@@ -65,7 +65,7 @@ class InfoCog(commands.Cog):
                 log.exception("Guild stats snapshot loop failed.")
             await asyncio.sleep(21600)
 
-    @discord.app_commands.command(name="user-info", description="Look up information about a server member.")
+    # Legacy slash handler kept for future reuse.
     async def userInfo(
         self,
         interaction: discord.Interaction,
@@ -81,7 +81,7 @@ class InfoCog(commands.Cog):
             ephemeral=False,
         )
 
-    @discord.app_commands.command(name="server-info", description="Show general information about this server.")
+    # Legacy slash handler kept for future reuse.
     async def serverInfo(self, interaction: discord.Interaction) -> None:
         if not interaction.guild or not interaction.channel:
             await self._safeEphemeral(interaction, "This command can only be used in a server.")
@@ -103,7 +103,7 @@ class InfoCog(commands.Cog):
             return
         await interactionRuntime.safeInteractionReply(interaction, embed=embed, ephemeral=False)
 
-    @discord.app_commands.command(name="server-stats", description="Show basic statistics for this server.")
+    # Legacy slash handler kept for future reuse.
     async def serverStats(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
             await self._safeEphemeral(interaction, "This command can only be used in a server.")

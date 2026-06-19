@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import aiohttp
 import discord
 
 from . import taskBudgeter
@@ -13,6 +14,9 @@ DISCORD_MESSAGE_CONTENT_MAX = 2000
 DISCORD_EMBED_FIELD_VALUE_MAX = 1024
 DISCORD_EMBED_FIELD_MAX = 25
 DISCORD_WEBHOOK_EMBED_MAX = 10
+WEBHOOK_AVATAR_FETCH_TIMEOUT_SEC = 8.0
+WEBHOOK_AVATAR_MAX_BYTES = 2_000_000
+_ownedWebhookAvatarSyncUrls: dict[int, str] = {}
 
 
 def clipWebhookContent(value: object, *, limit: int = DISCORD_MESSAGE_CONTENT_MAX) -> str:
@@ -76,6 +80,7 @@ async def _getOwnedWebhook(
     botClient: discord.Client,
     channel: discord.abc.Messageable | discord.abc.GuildChannel,
     webhookName: str,
+    avatarUrl: str | None = None,
     reason: str,
 ) -> tuple[discord.Webhook | None, discord.Thread | None]:
     if not getattr(botClient, "user", None):
@@ -100,13 +105,56 @@ async def _getOwnedWebhook(
         None,
     )
     if webhook is None:
+        avatarBytes = await _fetchWebhookAvatarBytes(avatarUrl)
         webhook = await taskBudgeter.runDiscord(
             lambda: webhookHostChannel.create_webhook(
                 name=webhookName[:80],
+                avatar=avatarBytes,
                 reason=reason,
             )
         )
+        if webhook is not None and avatarUrl:
+            _ownedWebhookAvatarSyncUrls[int(webhook.id)] = str(avatarUrl).strip()
+    elif avatarUrl:
+        normalizedAvatarUrl = str(avatarUrl).strip()
+        if _ownedWebhookAvatarSyncUrls.get(int(webhook.id)) != normalizedAvatarUrl:
+            avatarBytes = await _fetchWebhookAvatarBytes(normalizedAvatarUrl)
+            if avatarBytes is None:
+                return webhook, thread
+            webhook = await taskBudgeter.runDiscord(
+                lambda: webhook.edit(
+                    name=webhookName[:80],
+                    avatar=avatarBytes,
+                    reason=reason,
+                )
+            )
+            _ownedWebhookAvatarSyncUrls[int(webhook.id)] = normalizedAvatarUrl
     return webhook, thread
+
+
+async def _fetchWebhookAvatarBytes(avatarUrl: str | None) -> bytes | None:
+    normalizedUrl = str(avatarUrl or "").strip()
+    if not normalizedUrl:
+        return None
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=max(2.0, WEBHOOK_AVATAR_FETCH_TIMEOUT_SEC))
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(normalizedUrl) as response:
+                if int(response.status) < 200 or int(response.status) >= 300:
+                    return None
+                contentType = str(response.headers.get("Content-Type") or "").lower()
+                if contentType and "image" not in contentType:
+                    return None
+                data = await response.read()
+    except Exception:
+        return None
+
+    if not data:
+        return None
+    if len(data) > WEBHOOK_AVATAR_MAX_BYTES:
+        return None
+    return data
 
 
 async def sendOwnedWebhookMessageDetailed(
@@ -127,6 +175,7 @@ async def sendOwnedWebhookMessageDetailed(
             botClient=botClient,
             channel=channel,
             webhookName=webhookName,
+            avatarUrl=avatarUrl,
             reason=reason,
         )
         if webhook is None:
@@ -206,6 +255,7 @@ async def editOwnedWebhookMessage(
     embeds: list[discord.Embed] | None = None,
     content: str | None = None,
     view: discord.ui.View | None = None,
+    avatarUrl: str | None = None,
     reason: str = "Jane webhook message edit",
 ) -> bool:
     try:
@@ -213,6 +263,7 @@ async def editOwnedWebhookMessage(
             botClient=botClient,
             channel=message.channel,
             webhookName=webhookName,
+            avatarUrl=avatarUrl,
             reason=reason,
         )
         if webhook is None:

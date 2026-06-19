@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from db.sqlite import execute, executeReturnId, fetchAll, fetchOne
+from db.sqlite import execute, executeReturnId, fetchAll, fetchOne, runWriteTransaction
 
 STATUS_PENDING = "PENDING"
 STATUS_SECOND_REVIEW = "SECOND_REVIEW"
@@ -122,18 +122,39 @@ async def listQueueEntriesByStatus(
     return await fetchAll(query, tuple(params))
 
 
-async def findCandidateMatch(assetId: int, thumbnailHash: str) -> Optional[Dict]:
+async def findCandidateMatch(
+    assetId: int,
+    thumbnailHash: str,
+    *,
+    guildId: int | None = None,
+) -> Optional[Dict]:
     normalizedHash = str(thumbnailHash or "").strip()
-    rows = await fetchAll(
-        """
-        SELECT *
-        FROM bg_item_review_queue
-        WHERE assetId = ?
-           OR (COALESCE(thumbnailHash, '') <> '' AND thumbnailHash = ?)
-        ORDER BY datetime(lastSeenAt) DESC, queueId DESC
-        """,
-        (int(assetId), normalizedHash),
-    )
+    normalizedGuildId = int(guildId or 0)
+    if normalizedGuildId > 0:
+        rows = await fetchAll(
+            """
+            SELECT *
+            FROM bg_item_review_queue
+            WHERE guildId = ?
+              AND (
+                    assetId = ?
+                    OR (COALESCE(thumbnailHash, '') <> '' AND thumbnailHash = ?)
+              )
+            ORDER BY datetime(lastSeenAt) DESC, queueId DESC
+            """,
+            (normalizedGuildId, int(assetId), normalizedHash),
+        )
+    else:
+        rows = await fetchAll(
+            """
+            SELECT *
+            FROM bg_item_review_queue
+            WHERE assetId = ?
+               OR (COALESCE(thumbnailHash, '') <> '' AND thumbnailHash = ?)
+            ORDER BY datetime(lastSeenAt) DESC, queueId DESC
+            """,
+            (int(assetId), normalizedHash),
+        )
     if not rows:
         return None
     rows.sort(key=_rowPriority, reverse=True)
@@ -157,6 +178,7 @@ async def createQueueEntry(
     sourceRobloxUserId: Optional[int],
     sourceRobloxUsername: Optional[str],
     queuedByReviewerId: int,
+    contextJson: Optional[str] = None,
 ) -> int:
     return await executeReturnId(
         """
@@ -165,9 +187,10 @@ async def createQueueEntry(
             creatorId, creatorName, priceRobux,
             thumbnailHash, thumbnailUrl, thumbnailState,
             status, seenCount, sourceUserId, sourceRobloxUserId, sourceRobloxUsername,
+            contextJson,
             lastQueuedByReviewerId
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
         """,
         (
             int(guildId),
@@ -185,6 +208,7 @@ async def createQueueEntry(
             int(sourceUserId or 0),
             int(sourceRobloxUserId) if sourceRobloxUserId is not None else None,
             str(sourceRobloxUsername or "").strip() or None,
+            str(contextJson or "").strip(),
             int(queuedByReviewerId or 0),
         ),
     )
@@ -199,6 +223,7 @@ async def touchQueueEntry(
     sourceRobloxUserId: Optional[int],
     sourceRobloxUsername: Optional[str],
     queuedByReviewerId: int,
+    contextJson: Optional[str] = None,
 ) -> None:
     await execute(
         """
@@ -210,6 +235,10 @@ async def touchQueueEntry(
             sourceUserId = ?,
             sourceRobloxUserId = COALESCE(?, sourceRobloxUserId),
             sourceRobloxUsername = COALESCE(?, sourceRobloxUsername),
+            contextJson = CASE
+                WHEN ? <> '' THEN ?
+                ELSE contextJson
+            END,
             lastQueuedByReviewerId = ?,
             updatedAt = datetime('now')
         WHERE queueId = ?
@@ -220,6 +249,8 @@ async def touchQueueEntry(
             int(sourceUserId or 0),
             int(sourceRobloxUserId) if sourceRobloxUserId is not None else None,
             str(sourceRobloxUsername or "").strip() or None,
+            str(contextJson or "").strip(),
+            str(contextJson or "").strip(),
             int(queuedByReviewerId or 0),
             int(queueId),
         ),
@@ -294,21 +325,76 @@ async def updateQueueStatus(
     status: str,
     reviewerId: int,
     note: Optional[str] = None,
-) -> None:
+) -> bool:
     normalizedStatus = normalizeStatus(status)
+
+    async def _tx(db) -> bool:
+        cur = await db.execute(
+            """
+            UPDATE bg_item_review_queue
+            SET status = ?,
+                reviewNote = ?,
+                reviewedBy = ?,
+                reviewedAt = datetime('now'),
+                updatedAt = datetime('now')
+            WHERE queueId = ?
+              AND status NOT IN (?, ?, ?)
+            """,
+            (
+                normalizedStatus,
+                str(note or "").strip() or None,
+                int(reviewerId or 0),
+                int(queueId),
+                STATUS_FLAGGED,
+                STATUS_SAFE,
+                STATUS_IGNORED,
+            ),
+        )
+        return int(cur.rowcount or 0) > 0
+
+    return await runWriteTransaction(_tx)
+
+
+async def setQueueContext(queueId: int, *, contextJson: Optional[str]) -> None:
     await execute(
         """
         UPDATE bg_item_review_queue
-        SET status = ?,
-            reviewNote = ?,
-            reviewedBy = ?,
-            reviewedAt = datetime('now'),
+        SET contextJson = ?,
             updatedAt = datetime('now')
         WHERE queueId = ?
         """,
         (
-            normalizedStatus,
-            str(note or "").strip() or None,
+            str(contextJson or "").strip(),
+            int(queueId),
+        ),
+    )
+
+
+async def reopenQueueEntry(
+    queueId: int,
+    *,
+    reviewerId: int,
+    contextJson: Optional[str] = None,
+) -> None:
+    await execute(
+        """
+        UPDATE bg_item_review_queue
+        SET status = ?,
+            reviewNote = NULL,
+            reviewedBy = NULL,
+            reviewedAt = NULL,
+            contextJson = CASE
+                WHEN ? <> '' THEN ?
+                ELSE contextJson
+            END,
+            lastQueuedByReviewerId = ?,
+            updatedAt = datetime('now')
+        WHERE queueId = ?
+        """,
+        (
+            STATUS_PENDING,
+            str(contextJson or "").strip(),
+            str(contextJson or "").strip(),
             int(reviewerId or 0),
             int(queueId),
         ),

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import socket
+import ssl
 from typing import Any, Optional
 
+import aiohttp
 import discord
 
 from . import taskBudgeter
@@ -17,12 +20,69 @@ _SAFE_MESSAGE_DELETE_EXCEPTIONS = _SAFE_DISCORD_EXCEPTIONS + (AttributeError,)
 _SAFE_CHANNEL_SEND_EXCEPTIONS = _SAFE_DISCORD_EXCEPTIONS + _SAFE_CALLER_EXCEPTIONS
 
 
+class InteractionDeferFailed(RuntimeError):
+    pass
+
+
 def _logSafeFailure(action: str, exc: Exception) -> None:
     log.debug("Discord %s failed safely: %s", action, exc)
 
 
+def _logSafeTransportFailure(action: str, exc: Exception) -> None:
+    log.warning(
+        "Discord %s hit transient transport failure: %s: %s",
+        action,
+        exc.__class__.__name__,
+        exc,
+    )
+
+
 def _shouldRetryReplyWithoutView(exc: TypeError) -> bool:
     return "view" in str(exc).lower()
+
+
+def _isTransientTransportError(exc: Exception) -> bool:
+    transientMarkers = (
+        "wrong version number",
+        "cipher operation failed",
+        "bad record mac",
+        "unexpected eof",
+        "connection reset",
+        "connection aborted",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "session is closed",
+        "tls",
+        "ssl",
+    )
+
+    current: Exception | None = exc
+    while current is not None:
+        if isinstance(
+            current,
+            (
+                aiohttp.ClientError,
+                ssl.SSLError,
+                socket.timeout,
+                TimeoutError,
+                ConnectionError,
+            ),
+        ):
+            return True
+        if isinstance(current, OSError):
+            lowerMessage = str(current).lower()
+            if any(marker in lowerMessage for marker in transientMarkers):
+                return True
+        lowerMessage = str(current).lower()
+        if any(marker in lowerMessage for marker in transientMarkers):
+            return True
+        current = current.__cause__ if isinstance(current.__cause__, Exception) else None
+    return False
+
+
+def _isSafeTransportFailure(exc: Exception) -> bool:
+    return _isTransientTransportError(exc)
 
 
 def isUnknownInteractionError(exc: Exception) -> bool:
@@ -41,6 +101,7 @@ async def safeInteractionDefer(
     *,
     ephemeral: bool = True,
     thinking: bool = False,
+    raiseOnFailure: bool = True,
 ) -> bool:
     if interaction.response.is_done():
         return True
@@ -49,7 +110,16 @@ async def safeInteractionDefer(
         return True
     except (discord.NotFound, discord.HTTPException) as exc:
         _logSafeFailure("interaction defer", exc)
+        if raiseOnFailure:
+            raise InteractionDeferFailed("Interaction could not be acknowledged before it expired.") from exc
         return False
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("interaction defer", exc)
+            if raiseOnFailure:
+                raise InteractionDeferFailed("Interaction could not be acknowledged due to a Discord transport error.") from exc
+            return False
+        raise
 
 
 async def safeInteractionReply(
@@ -79,7 +149,7 @@ async def safeInteractionReply(
 
     async def _dispatch() -> None:
         if interaction.response.is_done():
-            await taskBudgeter.runDiscord(lambda: interaction.followup.send(**kwargs))
+            await taskBudgeter.runInteractiveDiscord(lambda: interaction.followup.send(**kwargs))
         else:
             await interaction.response.send_message(**kwargs)
 
@@ -104,6 +174,11 @@ async def safeInteractionReply(
     except (discord.NotFound, discord.HTTPException) as exc:
         _logSafeFailure("interaction reply", exc)
         return False
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("interaction reply", exc)
+            return False
+        raise
 
 
 async def safeInteractionSendModal(
@@ -125,54 +200,52 @@ async def safeInteractionSendModal(
     except (discord.NotFound, discord.HTTPException) as exc:
         _logSafeFailure("interaction modal", exc)
         return False
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("interaction modal", exc)
+            return False
+        raise
 
 
 async def safeMessageEdit(message: discord.Message, **kwargs: Any) -> bool:
     try:
-        await taskBudgeter.runDiscord(lambda: message.edit(**kwargs))
+        await taskBudgeter.runInteractiveDiscord(lambda: message.edit(**kwargs))
         return True
     except _SAFE_DISCORD_EXCEPTIONS as exc:
         _logSafeFailure("message edit", exc)
         return False
-
-
-async def safeInteractionEditOriginalResponse(interaction: discord.Interaction, **kwargs: Any) -> bool:
-    try:
-        await taskBudgeter.runInteractionAck(lambda: interaction.edit_original_response(**kwargs))
-        return True
-    except _SAFE_DISCORD_EXCEPTIONS as exc:
-        if isUnknownInteractionError(exc):
-            _logSafeFailure("interaction edit", exc)
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("message edit", exc)
             return False
         raise
 
 
 async def safeMessageDelete(message: discord.Message) -> bool:
     try:
-        await taskBudgeter.runDiscord(lambda: message.delete())
+        await taskBudgeter.runInteractiveDiscord(lambda: message.delete())
         return True
     except _SAFE_MESSAGE_DELETE_EXCEPTIONS as exc:
         _logSafeFailure("message delete", exc)
         return False
-    
-
-async def safeInteractionDeleteOriginalResponse(interaction: discord.Interaction) -> bool:
-    try:
-        await taskBudgeter.runInteractionAck(lambda: interaction.delete_original_response())
-        return True
-    except _SAFE_DISCORD_EXCEPTIONS as exc:
-        if isUnknownInteractionError(exc):
-            _logSafeFailure("interaction delete", exc)
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("message delete", exc)
             return False
         raise
 
 
 async def safeChannelSend(channel: Any, **kwargs: Any) -> discord.Message | None:
     try:
-        return await taskBudgeter.runDiscord(lambda: channel.send(**kwargs))
+        return await taskBudgeter.runInteractiveDiscord(lambda: channel.send(**kwargs))
     except _SAFE_CHANNEL_SEND_EXCEPTIONS as exc:
         _logSafeFailure("channel send", exc)
         return None
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("channel send", exc)
+            return None
+        raise
 
 
 async def safeFetchChannel(botOrGuild: Any, channelId: int) -> Any | None:
@@ -194,10 +267,15 @@ async def safeFetchChannel(botOrGuild: Any, channelId: int) -> Any | None:
     if not callable(fetchChannel):
         return None
     try:
-        return await taskBudgeter.runDiscord(lambda: fetchChannel(normalizedChannelId))
+        return await taskBudgeter.runInteractiveDiscord(lambda: fetchChannel(normalizedChannelId))
     except _SAFE_DISCORD_EXCEPTIONS + (discord.InvalidData, TypeError, ValueError) as exc:
         _logSafeFailure("fetch channel", exc)
         return None
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("fetch channel", exc)
+            return None
+        raise
 
 
 async def safeFetchMessage(channel: Any, messageId: int) -> discord.Message | None:
@@ -208,10 +286,15 @@ async def safeFetchMessage(channel: Any, messageId: int) -> discord.Message | No
     if normalizedMessageId <= 0 or not hasattr(channel, "fetch_message"):
         return None
     try:
-        return await taskBudgeter.runDiscord(lambda: channel.fetch_message(normalizedMessageId))
+        return await taskBudgeter.runInteractiveDiscord(lambda: channel.fetch_message(normalizedMessageId))
     except _SAFE_DISCORD_EXCEPTIONS + _SAFE_CALLER_EXCEPTIONS as exc:
         _logSafeFailure("fetch message", exc)
         return None
+    except Exception as exc:
+        if _isSafeTransportFailure(exc):
+            _logSafeTransportFailure("fetch message", exc)
+            return None
+        raise
 
 
 def _makeRetrySafeResponseMethod(originalMethod: Any, action: str) -> Any:
@@ -235,6 +318,7 @@ def installRetrySafeInteractionLayer() -> None:
     originalSendMessage = discord.InteractionResponse.send_message
     originalDefer = discord.InteractionResponse.defer
     originalSendModal = discord.InteractionResponse.send_modal
+    originalEditMessage = discord.InteractionResponse.edit_message
 
     discord.InteractionResponse.send_message = _makeRetrySafeResponseMethod(  # type: ignore[assignment]
         originalSendMessage,
@@ -247,6 +331,10 @@ def installRetrySafeInteractionLayer() -> None:
     discord.InteractionResponse.send_modal = _makeRetrySafeResponseMethod(  # type: ignore[assignment]
         originalSendModal,
         "interaction response send_modal",
+    )
+    discord.InteractionResponse.edit_message = _makeRetrySafeResponseMethod(  # type: ignore[assignment]
+        originalEditMessage,
+        "interaction response edit_message",
     )
 
     _retrySafeLayerInstalled = True

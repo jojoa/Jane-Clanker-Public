@@ -228,9 +228,8 @@ class MultiOrbatEngine:
         return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
     def _resolveSheetIdentity(self, sheet: MultiOrbatSheetConfig) -> tuple[int, str]:
-        service = self._getService(sheet)
-
         def _fetchMeta():
+            service = self._getService(sheet)
             return service.spreadsheets().get(spreadsheetId=sheet.spreadsheetId).execute()
 
         metadata = self._withRetry(_fetchMeta)
@@ -275,9 +274,9 @@ class MultiOrbatEngine:
 
     def getValues(self, sheetKey: str, rangeA1: str, **kwargs: Any) -> list[list[Any]]:
         sheet = self.getSheetConfig(sheetKey)
-        service = self._getService(sheet)
 
         def _run():
+            service = self._getService(sheet)
             requestParams = {"spreadsheetId": sheet.spreadsheetId, "range": rangeA1}
             requestParams.update(kwargs)
             return (
@@ -292,9 +291,9 @@ class MultiOrbatEngine:
 
     def batchGetValues(self, sheetKey: str, ranges: list[str], **kwargs: Any) -> list[dict[str, Any]]:
         sheet = self.getSheetConfig(sheetKey)
-        service = self._getService(sheet)
 
         def _run():
+            service = self._getService(sheet)
             requestParams = {"spreadsheetId": sheet.spreadsheetId, "ranges": ranges}
             requestParams.update(kwargs)
             return (
@@ -311,13 +310,13 @@ class MultiOrbatEngine:
         if not rows:
             return
         sheet = self.getSheetConfig(sheetKey)
-        service = self._getService(sheet)
         body = {
             "valueInputOption": "USER_ENTERED",
             "data": rows,
         }
 
         def _run():
+            service = self._getService(sheet)
             service.spreadsheets().values().batchUpdate(
                 spreadsheetId=sheet.spreadsheetId,
                 body=body,
@@ -329,10 +328,10 @@ class MultiOrbatEngine:
         if not requests:
             return
         sheet = self.getSheetConfig(sheetKey)
-        service = self._getService(sheet)
         body = {"requests": requests}
 
         def _run():
+            service = self._getService(sheet)
             service.spreadsheets().batchUpdate(
                 spreadsheetId=sheet.spreadsheetId,
                 body=body,
@@ -352,10 +351,10 @@ class MultiOrbatEngine:
         if not values:
             return {}
         sheet = self.getSheetConfig(sheetKey)
-        service = self._getService(sheet)
         body = {"values": values}
 
         def _run():
+            service = self._getService(sheet)
             return (
                 service.spreadsheets()
                 .values()
@@ -373,9 +372,9 @@ class MultiOrbatEngine:
 
     def getSpreadsheetMetadata(self, sheetKey: str) -> dict[str, Any]:
         sheet = self.getSheetConfig(sheetKey)
-        service = self._getService(sheet)
 
         def _run():
+            service = self._getService(sheet)
             return service.spreadsheets().get(spreadsheetId=sheet.spreadsheetId).execute()
 
         return self._withRetry(_run)

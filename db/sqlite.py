@@ -1,22 +1,73 @@
 import aiosqlite
 import asyncio
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, TypeVar
 
 dbPath = str(Path(__file__).resolve().parent.parent / "bot.db")
 _dbConn: Optional[aiosqlite.Connection] = None
 _dbConnInitLock = asyncio.Lock()
+_dbOperationLock = asyncio.Lock()
 _dbWriteLock = asyncio.Lock()
 log = logging.getLogger(__name__)
-_schemaVersionTarget = 22
+_schemaVersionTarget = 29
 _T = TypeVar("_T")
+_sqliteBusyTimeoutMs = 60_000
+_sqliteLockRetryDelaysSec = (0.25, 0.75, 1.5, 3.0, 5.0)
 
 
 async def _prepareConnection(db: aiosqlite.Connection) -> None:
     # Connection-scoped pragmas
     await db.execute("PRAGMA foreign_keys=ON;")
-    await db.execute("PRAGMA busy_timeout=5000;")
+    await db.execute(f"PRAGMA busy_timeout={_sqliteBusyTimeoutMs};")
+
+
+def _isDatabaseLocked(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _querySummary(query: str) -> str:
+    return " ".join(str(query or "").split())[:180]
+
+
+async def _rollbackQuietly(db: aiosqlite.Connection) -> None:
+    try:
+        await db.rollback()
+    except Exception:
+        log.debug("SQLite rollback after failed operation also failed.", exc_info=True)
+
+
+async def _runWithLockedDatabaseRetries(
+    operationName: str,
+    query: str,
+    callback: Callable[[], Awaitable[_T]],
+    *,
+    rollback: Callable[[], Awaitable[None]] | None = None,
+) -> _T:
+    maxAttempts = len(_sqliteLockRetryDelaysSec) + 1
+    for attempt in range(maxAttempts):
+        try:
+            return await callback()
+        except sqlite3.OperationalError as exc:
+            if rollback is not None:
+                await rollback()
+            if not _isDatabaseLocked(exc) or attempt >= maxAttempts - 1:
+                raise
+            delaySec = _sqliteLockRetryDelaysSec[attempt]
+            log.warning(
+                "SQLite %s hit a locked database; retrying in %.2fs (%d/%d). query=%s",
+                operationName,
+                delaySec,
+                attempt + 1,
+                maxAttempts - 1,
+                _querySummary(query),
+            )
+            await asyncio.sleep(delaySec)
+    raise RuntimeError("unreachable sqlite retry state")
 
 
 async def _readSchemaVersion(db: aiosqlite.Connection) -> int:
@@ -41,7 +92,7 @@ async def _getConnection() -> aiosqlite.Connection:
     async with _dbConnInitLock:
         if _dbConn is not None:
             return _dbConn
-        db = await aiosqlite.connect(dbPath, timeout=30)
+        db = await aiosqlite.connect(dbPath, timeout=_sqliteBusyTimeoutMs / 1000)
         await _prepareConnection(db)
         db.row_factory = aiosqlite.Row
         _dbConn = db
@@ -56,8 +107,11 @@ async def initDb():
         async def _executeOptional(statement: str) -> None:
             try:
                 await db.execute(statement)
-            except Exception:
-                pass
+            except Exception as exc:
+                message = str(exc).lower()
+                if "duplicate column name" in message or "already exists" in message:
+                    return
+                raise
 
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA synchronous=NORMAL;")
@@ -207,6 +261,19 @@ async def initDb():
             updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS bg_spreadsheet_additions (
+            guildId INTEGER NOT NULL,
+            userId INTEGER NOT NULL,
+            addedBy INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT '',
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            consumedAt TEXT,
+            consumedSessionId INTEGER,
+            consumedSpreadsheetId TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (guildId, userId)
+        );
+        """)
         for statement in (
             "ALTER TABLE bg_intelligence_reports ADD COLUMN scored INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE bg_intelligence_reports ADD COLUMN outcome TEXT NOT NULL DEFAULT 'scored'",
@@ -278,6 +345,62 @@ async def initDb():
         );
         """)
         await db.execute("""
+        CREATE TABLE IF NOT EXISTS jane_identity_link_attempts (
+            state TEXT PRIMARY KEY,
+            discordUserId INTEGER NOT NULL,
+            guildId INTEGER NOT NULL DEFAULT 0,
+            codeVerifier TEXT NOT NULL,
+            authorizeUrl TEXT NOT NULL DEFAULT '',
+            expiresAt TEXT NOT NULL,
+            createdAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS jane_identity_groups (
+            guildId INTEGER NOT NULL,
+            groupId INTEGER NOT NULL,
+            groupName TEXT NOT NULL DEFAULT '',
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (guildId, groupId)
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS jane_identity_guild_settings (
+            guildId INTEGER PRIMARY KEY,
+            unverifiedRoleId INTEGER NOT NULL DEFAULT 0,
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS jane_identity_role_rules (
+            ruleId INTEGER PRIMARY KEY AUTOINCREMENT,
+            guildId INTEGER NOT NULL,
+            groupId INTEGER NOT NULL,
+            minRank INTEGER NOT NULL DEFAULT 1,
+            maxRank INTEGER NOT NULL DEFAULT 255,
+            roleId INTEGER NOT NULL,
+            removeWhenUnmatched INTEGER NOT NULL DEFAULT 1,
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS jane_identity_name_rules (
+            ruleId INTEGER PRIMARY KEY AUTOINCREMENT,
+            guildId INTEGER NOT NULL,
+            groupId INTEGER NOT NULL,
+            minRank INTEGER NOT NULL DEFAULT 1,
+            maxRank INTEGER NOT NULL DEFAULT 255,
+            prefix TEXT NOT NULL DEFAULT '',
+            suffix TEXT NOT NULL DEFAULT '',
+            priority INTEGER NOT NULL DEFAULT 0,
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
+        await db.execute("""
         CREATE TABLE IF NOT EXISTS orbat_member_mirror (
             sheetKey TEXT NOT NULL,
             spreadsheetId TEXT NOT NULL,
@@ -338,6 +461,17 @@ async def initDb():
         );
         """)
         await _executeOptional("ALTER TABLE cohost_volunteers ADD COLUMN rank TEXT NOT NULL DEFAULT ''")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS cohost_history (
+            historyId INTEGER PRIMARY KEY AUTOINCREMENT,
+            guildId INTEGER NOT NULL,
+            requestMessageId INTEGER NOT NULL DEFAULT 0,
+            eventType TEXT NOT NULL,
+            userId INTEGER NOT NULL,
+            rank TEXT NOT NULL DEFAULT '',
+            selectedAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_events (
             eventId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -413,6 +547,15 @@ async def initDb():
             toStatus TEXT,
             note TEXT,
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS mcstatus (
+            statusMessageId INTEGER NOT NULL,
+            lastStatus TEXT NOT NULL,
+            lastPlayerCount INTEGER NOT NULL,
+            lastMaintenanceDate TEXT NOT NULL,
+            statusChannelId INTEGER NOT NULL
         );
         """)
         await db.execute("""
@@ -496,12 +639,47 @@ async def initDb():
         """)
         await _executeOptional("ALTER TABLE bg_flag_rules ADD COLUMN severity INTEGER NOT NULL DEFAULT 0")
         await db.execute("""
+        CREATE TABLE IF NOT EXISTS bg_flag_proposals (
+            proposalId INTEGER PRIMARY KEY AUTOINCREMENT,
+            guildId INTEGER NOT NULL DEFAULT 0,
+            channelId INTEGER,
+            messageId INTEGER,
+            ruleType TEXT NOT NULL,
+            ruleValue TEXT NOT NULL,
+            note TEXT,
+            severity INTEGER NOT NULL DEFAULT 0,
+            proposedBy INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            resultingRuleId INTEGER,
+            resolvedBy INTEGER,
+            resolvedAt TEXT,
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS bg_flag_proposal_votes (
+            proposalId INTEGER NOT NULL,
+            voterId INTEGER NOT NULL,
+            vote TEXT NOT NULL,
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (proposalId, voterId)
+        );
+        """)
+        await db.execute("""
         CREATE TABLE IF NOT EXISTS bg_item_visual_refs (
             assetId INTEGER PRIMARY KEY,
             sourceRuleId INTEGER,
             sourceRuleCount INTEGER NOT NULL DEFAULT 1,
             note TEXT,
+            assetName TEXT,
+            assetTypeId INTEGER,
+            assetTypeName TEXT,
+            visualCategory TEXT NOT NULL DEFAULT '',
             thumbnailHash TEXT,
+            colorSignature TEXT,
+            colorSignatureVersion INTEGER NOT NULL DEFAULT 0,
             hashSize INTEGER NOT NULL DEFAULT 0,
             thumbnailUrl TEXT,
             thumbnailState TEXT NOT NULL DEFAULT '',
@@ -512,6 +690,12 @@ async def initDb():
             updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
+        await _executeOptional("ALTER TABLE bg_item_visual_refs ADD COLUMN colorSignature TEXT")
+        await _executeOptional("ALTER TABLE bg_item_visual_refs ADD COLUMN colorSignatureVersion INTEGER NOT NULL DEFAULT 0")
+        await _executeOptional("ALTER TABLE bg_item_visual_refs ADD COLUMN assetName TEXT")
+        await _executeOptional("ALTER TABLE bg_item_visual_refs ADD COLUMN assetTypeId INTEGER")
+        await _executeOptional("ALTER TABLE bg_item_visual_refs ADD COLUMN assetTypeName TEXT")
+        await _executeOptional("ALTER TABLE bg_item_visual_refs ADD COLUMN visualCategory TEXT NOT NULL DEFAULT ''")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS bg_item_review_queue (
             queueId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -537,12 +721,14 @@ async def initDb():
             reviewChannelId INTEGER,
             reviewMessageId INTEGER,
             reviewNote TEXT,
+            contextJson TEXT NOT NULL DEFAULT '',
             reviewedBy INTEGER,
             reviewedAt TEXT,
             createdAt TEXT NOT NULL DEFAULT (datetime('now')),
             updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
+        await _executeOptional("ALTER TABLE bg_item_review_queue ADD COLUMN contextJson TEXT NOT NULL DEFAULT ''")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS bg_item_review_sources (
             sourceId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1192,8 +1378,8 @@ async def initDb():
             submissionId INTEGER NOT NULL DEFAULT 0,
             guildId INTEGER NOT NULL,
             eventId INTEGER NOT NULL,
-            targetUserId INTEGER NOT NULL DEFAULT 0,
-            participationRole TEXT NOT NULL DEFAULT 'ATTENDEE',
+            userId INTEGER NOT NULL DEFAULT 0,
+            participantRole TEXT NOT NULL DEFAULT 'ATTENDEE',
             memberGroup TEXT NOT NULL DEFAULT '',
             gradedAttendeeCount INTEGER NOT NULL DEFAULT 0,
             assistedScreens INTEGER NOT NULL DEFAULT 0,
@@ -1204,8 +1390,6 @@ async def initDb():
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
-        await _executeOptional("ALTER TABLE hg_attendance_records ADD COLUMN targetRobloxUsername TEXT NOT NULL DEFAULT ''")
-        await _executeOptional("ALTER TABLE hg_attendance_records ADD COLUMN eventDate TEXT NOT NULL DEFAULT ''")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS hg_sentry_logs (
             sentryLogId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1244,6 +1428,8 @@ async def initDb():
             eventId INTEGER PRIMARY KEY AUTOINCREMENT,
             submissionId INTEGER NOT NULL DEFAULT 0,
             messageId INTEGER NOT NULL DEFAULT 0,
+            channelId INTEGER NOT NULL DEFAULT 0,
+            clockinSessionId INTEGER NOT NULL DEFAULT 0,
             guildId INTEGER NOT NULL,
             eventType TEXT NOT NULL,
             eventTitle TEXT NOT NULL DEFAULT '',
@@ -1254,12 +1440,12 @@ async def initDb():
             status TEXT NOT NULL DEFAULT 'OPEN', -- OPEN/FINISHED/SUBMITTED/CANCELED
             startedAt TEXT,
             finishedAt TEXT,
+            durationMinutes INTEGER NOT NULL DEFAULT 0,
             createdBy INTEGER NOT NULL DEFAULT 0,
             createdAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
-        await _executeOptional("ALTER TABLE hg_event_records ADD COLUMN metadataJson TEXT NOT NULL DEFAULT '{}'")
-        await _executeOptional("ALTER TABLE hg_event_records ADD COLUMN updatedAt TEXT NOT NULL DEFAULT (datetime('now'))")
+        await _executeOptional("ALTER TABLE hg_event_records ADD COLUMN clockinSessionId INTEGER NOT NULL DEFAULT 0")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS reaction_role_entries (
             entryId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1381,9 +1567,14 @@ async def initDb():
             "CREATE INDEX IF NOT EXISTS idx_bg_alt_links_target_discord ON bg_alt_links(targetDiscordUserId, status, updatedAt)",
             "CREATE INDEX IF NOT EXISTS idx_bg_alt_links_source_roblox ON bg_alt_links(sourceRobloxUserId, status, updatedAt)",
             "CREATE INDEX IF NOT EXISTS idx_bg_alt_links_target_roblox ON bg_alt_links(targetRobloxUserId, status, updatedAt)",
+            "CREATE INDEX IF NOT EXISTS idx_bg_spreadsheet_additions_pending ON bg_spreadsheet_additions(guildId, consumedAt, createdAt)",
             "CREATE INDEX IF NOT EXISTS idx_points_pending_processed_user ON points_pending(processedAt, userId)",
             "CREATE INDEX IF NOT EXISTS idx_roblox_identity_username ON roblox_identity_links(robloxUsername)",
             "CREATE INDEX IF NOT EXISTS idx_roblox_identity_updated ON roblox_identity_links(updatedAt)",
+            "CREATE INDEX IF NOT EXISTS idx_jane_identity_link_attempts_expires ON jane_identity_link_attempts(expiresAt)",
+            "CREATE INDEX IF NOT EXISTS idx_jane_identity_settings_unverified ON jane_identity_guild_settings(unverifiedRoleId)",
+            "CREATE INDEX IF NOT EXISTS idx_jane_identity_role_rules_guild ON jane_identity_role_rules(guildId, groupId)",
+            "CREATE INDEX IF NOT EXISTS idx_jane_identity_name_rules_guild ON jane_identity_name_rules(guildId, groupId)",
             "CREATE INDEX IF NOT EXISTS idx_orbat_mirror_username ON orbat_member_mirror(robloxUsernameKey, active)",
             "CREATE INDEX IF NOT EXISTS idx_orbat_mirror_discord ON orbat_member_mirror(discordUserId, active)",
             "CREATE INDEX IF NOT EXISTS idx_orbat_mirror_sheet_active ON orbat_member_mirror(sheetKey, active)",
@@ -1391,6 +1582,10 @@ async def initDb():
             "CREATE INDEX IF NOT EXISTS idx_orbat_mirror_synced ON orbat_member_mirror(lastSyncedAt)",
             "CREATE INDEX IF NOT EXISTS idx_cohost_requests_status ON cohost_requests(status)",
             "CREATE INDEX IF NOT EXISTS idx_cohost_volunteers_message_join ON cohost_volunteers(messageId, joinTime)",
+            "CREATE INDEX IF NOT EXISTS idx_cohost_history_guild_user ON cohost_history(guildId, userId)",
+            "CREATE INDEX IF NOT EXISTS idx_cohost_history_guild_event ON cohost_history(guildId, eventType)",
+            "CREATE INDEX IF NOT EXISTS idx_cohost_history_selected ON cohost_history(selectedAt)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_cohost_history_request_user ON cohost_history(requestMessageId, userId)",
             "CREATE INDEX IF NOT EXISTS idx_scheduled_events_status_time ON scheduled_events(status, eventAtUtc)",
             "CREATE INDEX IF NOT EXISTS idx_scheduled_events_message ON scheduled_events(messageId)",
             "CREATE INDEX IF NOT EXISTS idx_scheduled_event_rsvps_event_response ON scheduled_event_rsvps(eventId, response, updatedAt)",
@@ -1419,6 +1614,9 @@ async def initDb():
             "CREATE INDEX IF NOT EXISTS idx_ribbon_proofs_request ON ribbon_request_proofs(requestId)",
             "CREATE INDEX IF NOT EXISTS idx_ribbon_events_request ON ribbon_request_events(requestId, createdAt)",
             "CREATE INDEX IF NOT EXISTS idx_bg_flag_rules_type ON bg_flag_rules(ruleType)",
+            "CREATE INDEX IF NOT EXISTS idx_bg_flag_proposals_status ON bg_flag_proposals(status, createdAt)",
+            "CREATE INDEX IF NOT EXISTS idx_bg_flag_proposals_message ON bg_flag_proposals(channelId, messageId)",
+            "CREATE INDEX IF NOT EXISTS idx_bg_flag_proposal_votes_proposal ON bg_flag_proposal_votes(proposalId, vote)",
             "CREATE INDEX IF NOT EXISTS idx_john_event_log_channel_processed ON john_event_log_messages(channelId, processedAt)",
             "CREATE INDEX IF NOT EXISTS idx_training_result_logs_host_created ON training_result_logs(hostId, sourceCreatedAt)",
             "CREATE INDEX IF NOT EXISTS idx_training_result_logs_type_created ON training_result_logs(certType, certVariant, sourceCreatedAt)",
@@ -1461,13 +1659,16 @@ async def initDb():
             "CREATE INDEX IF NOT EXISTS idx_hg_submissions_target ON hg_submissions(targetUserId, targetRobloxUsername, createdAt)",
             "CREATE INDEX IF NOT EXISTS idx_hg_submission_events_submission ON hg_submission_events(submissionId, createdAt)",
             "CREATE INDEX IF NOT EXISTS idx_hg_point_awards_target ON hg_point_awards(targetUserId, targetRobloxUsername, createdAt)",
-            "CREATE INDEX IF NOT EXISTS idx_hg_attendance_target ON hg_attendance_records(targetUserId, targetRobloxUsername, eventDate)",
+            "CREATE INDEX IF NOT EXISTS idx_hg_attendance_target ON hg_attendance_records(userId, targetRobloxUsername, eventDate)",
             "CREATE INDEX IF NOT EXISTS idx_hg_sentry_user_date ON hg_sentry_logs(userId, dutyDate, status)",
             "CREATE INDEX IF NOT EXISTS idx_hg_quota_cycles_status ON hg_quota_cycles(status, cycleEndDate)",
             "CREATE INDEX IF NOT EXISTS idx_hg_event_records_event ON hg_event_records(guildId, eventDate, eventType)",
+            "CREATE INDEX IF NOT EXISTS idx_hg_event_records_clockin_session ON hg_event_records(clockinSessionId)",
             "CREATE INDEX IF NOT EXISTS idx_bg_item_visual_refs_state ON bg_item_visual_refs(validationState, updatedAt)",
             "CREATE INDEX IF NOT EXISTS idx_bg_item_visual_refs_rule ON bg_item_visual_refs(sourceRuleId)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bg_item_review_queue_asset_hash ON bg_item_review_queue(assetId, thumbnailHash)",
+            "CREATE INDEX IF NOT EXISTS idx_bg_item_visual_refs_category ON bg_item_visual_refs(visualCategory, assetTypeId)",
+            "DROP INDEX IF EXISTS idx_bg_item_review_queue_asset_hash",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bg_item_review_queue_asset_hash ON bg_item_review_queue(guildId, assetId, thumbnailHash)",
             "CREATE INDEX IF NOT EXISTS idx_bg_item_review_queue_status_seen ON bg_item_review_queue(status, lastSeenAt)",
             "CREATE INDEX IF NOT EXISTS idx_bg_item_review_queue_channel_message ON bg_item_review_queue(reviewChannelId, reviewMessageId)",
             "CREATE INDEX IF NOT EXISTS idx_bg_item_review_sources_queue_created ON bg_item_review_sources(queueId, createdAt)",
@@ -1504,57 +1705,95 @@ async def initDb():
             )
 
 async def fetchOne(query: str, params: tuple = ()):
-    db = await _getConnection()
-    async with db.execute(query, params) as cur:
-        row = await cur.fetchone()
-        return dict(row) if row else None
+    async def _fetch() -> Optional[dict]:
+        async with _dbOperationLock:
+            db = await _getConnection()
+            async with db.execute(query, params) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    return await _runWithLockedDatabaseRetries("fetchOne", query, _fetch)
 
 async def fetchAll(query: str, params: tuple = ()):
-    db = await _getConnection()
-    async with db.execute(query, params) as cur:
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+    async def _fetch() -> list[dict]:
+        async with _dbOperationLock:
+            db = await _getConnection()
+            async with db.execute(query, params) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+
+    return await _runWithLockedDatabaseRetries("fetchAll", query, _fetch)
 
 async def execute(query: str, params: tuple = ()):
-    db = await _getConnection()
-    async with _dbWriteLock:
-        await db.execute(query, params)
-        await db.commit()
+    async def _write() -> None:
+        async with _dbOperationLock:
+            db = await _getConnection()
+            async with _dbWriteLock:
+                try:
+                    await db.execute(query, params)
+                    await db.commit()
+                except Exception:
+                    await _rollbackQuietly(db)
+                    raise
+
+    return await _runWithLockedDatabaseRetries("execute", query, _write)
 
 async def executeReturnId(query: str, params: tuple = ()) -> int:
-    db = await _getConnection()
-    async with _dbWriteLock:
-        cur = await db.execute(query, params)
-        await db.commit()
-        return cur.lastrowid
+    async def _write() -> int:
+        async with _dbOperationLock:
+            db = await _getConnection()
+            async with _dbWriteLock:
+                try:
+                    cur = await db.execute(query, params)
+                    await db.commit()
+                    return cur.lastrowid
+                except Exception:
+                    await _rollbackQuietly(db)
+                    raise
+
+    return await _runWithLockedDatabaseRetries("executeReturnId", query, _write)
 
 async def executeMany(query: str, paramsSeq: list[tuple]) -> None:
     if not paramsSeq:
         return
-    db = await _getConnection()
-    async with _dbWriteLock:
-        await db.executemany(query, paramsSeq)
-        await db.commit()
+
+    async def _write() -> None:
+        async with _dbOperationLock:
+            db = await _getConnection()
+            async with _dbWriteLock:
+                try:
+                    await db.executemany(query, paramsSeq)
+                    await db.commit()
+                except Exception:
+                    await _rollbackQuietly(db)
+                    raise
+
+    return await _runWithLockedDatabaseRetries("executeMany", query, _write)
 
 
 async def runWriteTransaction(callback: Callable[[aiosqlite.Connection], Awaitable[_T]]) -> _T:
-    db = await _getConnection()
-    async with _dbWriteLock:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            result = await callback(db)
-        except Exception:
-            await db.rollback()
-            raise
-        await db.commit()
-        return result
+    async def _write() -> _T:
+        async with _dbOperationLock:
+            db = await _getConnection()
+            async with _dbWriteLock:
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    result = await callback(db)
+                    await db.commit()
+                    return result
+                except Exception:
+                    await _rollbackQuietly(db)
+                    raise
+
+    return await _runWithLockedDatabaseRetries("runWriteTransaction", "BEGIN IMMEDIATE", _write)
 
 async def closeDb() -> None:
     global _dbConn
-    if _dbConn is None:
-        return
-    async with _dbConnInitLock:
+    async with _dbOperationLock:
         if _dbConn is None:
             return
-        await _dbConn.close()
-        _dbConn = None
+        async with _dbConnInitLock:
+            if _dbConn is None:
+                return
+            await _dbConn.close()
+            _dbConn = None

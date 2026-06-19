@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -7,7 +8,9 @@ import discord
 from discord import CategoryChannel, Interaction, Member, VoiceChannel
 from discord.ext import commands
 
+import config
 import runtime.interaction as interactionRuntime
+from runtime import taskBudgeter
 from config import permanentVoiceChatChannelIds, serverId, voiceChannelCreationCategory
 from features.staff.voiceChat.breakRoomPerms import getBreakroomPerms
 from features.staff.voiceChat.gameNightPerms import getGameNightPerms
@@ -40,7 +43,7 @@ _TEMP_VOICE_CHAT_GROUP_ORDER = (
 )
 _STATIC_CHANNEL_LAYOUT = (
     "ANRO Stage",
-    "TQUAL Stage"
+    "TQUAL Stage",
     "TQUAL Trainings VC",
     "TQUAL Exams VC",
     "Shift Comms",
@@ -59,6 +62,7 @@ _TEMP_CHANNEL_NAME_PATTERNS: dict[str, re.Pattern[str]] = {
 
 _onlineVoiceChatsTotal = 0
 _onlineVoiceChatsTable = {voiceChatType: [] for voiceChatType in _TRACKED_VOICE_CHAT_TYPES}
+_rebalanceLock = asyncio.Lock()
 
 
 async def _safeEphemeral(interaction: Interaction | None, message: str) -> None:
@@ -167,7 +171,11 @@ def _nextVoiceChannelName(channelType: str, existingChannels: list[VoiceChannel]
     return f"{channelPrefix} {channelNumber}"
 
 
-async def syncTrackedVoiceChats(bot: commands.Bot) -> dict[str, list[VoiceChannel]]:
+async def syncTrackedVoiceChats(
+    bot: commands.Bot,
+    *,
+    rebalance: bool = False,
+) -> dict[str, list[VoiceChannel]]:
     resetVoiceChatsTable()
     guild = _getVoiceChatGuild(bot)
     category = _getVoiceChatCategory(guild)
@@ -179,69 +187,95 @@ async def syncTrackedVoiceChats(bot: commands.Bot) -> dict[str, list[VoiceChanne
         if channelType is None:
             continue
         _trackVoiceChannel(channelType, voiceChannel)
-    await _rebalanceVoiceChatCategory(bot)
+    if rebalance:
+        await _rebalanceVoiceChatCategory(bot)
     return _trackedVoiceChatTypes()
 
 
 async def _rebalanceVoiceChatCategory(bot: commands.Bot) -> None:
+    if _rebalanceLock.locked():
+        log.info("Voice chat category rebalance skipped; another rebalance is already running.")
+        return
+
     guild = _getVoiceChatGuild(bot)
     category = _getVoiceChatCategory(guild)
     if category is None:
         return
 
-    orderedChannels = list(category.channels)
-    if not orderedChannels:
-        return
+    async with _rebalanceLock:
+        orderedChannels = list(category.channels)
+        if not orderedChannels:
+            return
 
-    staticChannelsByName = {
-        str(channel.name).casefold(): channel
-        for channel in orderedChannels
-        if str(channel.name).casefold() in _STATIC_CHANNEL_NAMES
-    }
-    tempChannelsByType: dict[str, list[discord.abc.GuildChannel]] = {
-        channelType: [] for channelType in _TEMP_VOICE_CHAT_GROUP_ORDER
-    }
-    remainderChannels: list[discord.abc.GuildChannel] = []
+        staticChannelsByName = {
+            str(channel.name).casefold(): channel
+            for channel in orderedChannels
+            if str(channel.name).casefold() in _STATIC_CHANNEL_NAMES
+        }
+        tempChannelsByType: dict[str, list[discord.abc.GuildChannel]] = {
+            channelType: [] for channelType in _TEMP_VOICE_CHAT_GROUP_ORDER
+        }
+        remainderChannels: list[discord.abc.GuildChannel] = []
 
-    for channel in orderedChannels:
-        channelName = str(channel.name or "").casefold()
-        if channelName in _STATIC_CHANNEL_NAMES:
-            continue
-        if isinstance(channel, VoiceChannel):
-            channelType = getManagedVoiceChatType(channel)
-            if channelType is not None and channelType in tempChannelsByType:
-                tempChannelsByType[channelType].append(channel)
+        for channel in orderedChannels:
+            channelName = str(channel.name or "").casefold()
+            if channelName in _STATIC_CHANNEL_NAMES:
                 continue
-        remainderChannels.append(channel)
+            if isinstance(channel, VoiceChannel):
+                channelType = getManagedVoiceChatType(channel)
+                if channelType is not None and channelType in tempChannelsByType:
+                    tempChannelsByType[channelType].append(channel)
+                    continue
+            remainderChannels.append(channel)
 
-    desiredOrder: list[discord.abc.GuildChannel] = []
-    for staticName in _STATIC_CHANNEL_LAYOUT:
-        staticChannel = staticChannelsByName.get(staticName.casefold())
-        if staticChannel is not None:
-            desiredOrder.append(staticChannel)
-    for channelType in _TEMP_VOICE_CHAT_GROUP_ORDER:
-        desiredOrder.extend(
-            sorted(
-                tempChannelsByType[channelType],
-                key=lambda channel: (
-                    _extractChannelNumber(channelType, str(channel.name or "")),
-                    int(getattr(channel, "id", 0) or 0),
-                ),
+        desiredOrder: list[discord.abc.GuildChannel] = []
+        for staticName in _STATIC_CHANNEL_LAYOUT:
+            staticChannel = staticChannelsByName.get(staticName.casefold())
+            if staticChannel is not None:
+                desiredOrder.append(staticChannel)
+        for channelType in _TEMP_VOICE_CHAT_GROUP_ORDER:
+            desiredOrder.extend(
+                sorted(
+                    tempChannelsByType[channelType],
+                    key=lambda channel: (
+                        _extractChannelNumber(channelType, str(channel.name or "")),
+                        int(getattr(channel, "id", 0) or 0),
+                    ),
+                )
             )
-        )
-    desiredOrder.extend(remainderChannels)
+        desiredOrder.extend(remainderChannels)
 
-    currentOrderIds = [int(channel.id) for channel in orderedChannels]
-    desiredOrderIds = [int(channel.id) for channel in desiredOrder]
-    if currentOrderIds == desiredOrderIds:
-        return
+        currentOrderIds = [int(channel.id) for channel in orderedChannels]
+        desiredOrderIds = [int(channel.id) for channel in desiredOrder]
+        if currentOrderIds == desiredOrderIds:
+            return
 
-    targetPositions = sorted(int(channel.position) for channel in orderedChannels)
-    for index, channel in enumerate(desiredOrder):
-        try:
-            await channel.edit(position=targetPositions[index])
-        except Exception:
-            log.exception("Failed to rebalance voice chat channel order for %s.", channel)
+        targetPositions = sorted(int(channel.position) for channel in orderedChannels)
+        plannedEdits: list[tuple[discord.abc.GuildChannel, int]] = []
+        for index, channel in enumerate(desiredOrder):
+            targetPosition = targetPositions[index]
+            if int(getattr(channel, "position", 0) or 0) != targetPosition:
+                plannedEdits.append((channel, targetPosition))
+
+        maxEdits = max(0, int(getattr(config, "voiceChatRebalanceMaxPositionEdits", 4) or 4))
+        editDelaySec = max(0.0, float(getattr(config, "voiceChatRebalanceEditDelaySec", 1.25) or 1.25))
+        editsToRun = plannedEdits[:maxEdits]
+        skippedEdits = max(0, len(plannedEdits) - len(editsToRun))
+        for index, (channel, targetPosition) in enumerate(editsToRun):
+            try:
+                await taskBudgeter.runLowPriorityDiscord(
+                    lambda channel=channel, targetPosition=targetPosition: channel.edit(position=targetPosition)
+                )
+                if editDelaySec > 0 and index < len(editsToRun) - 1:
+                    await asyncio.sleep(editDelaySec)
+            except Exception:
+                log.exception("Failed to rebalance voice chat channel order for %s.", channel)
+        if skippedEdits:
+            log.warning(
+                "Voice chat category rebalance stopped after %d position edit(s); %d move(s) left for a later run.",
+                len(editsToRun),
+                skippedEdits,
+            )
 
 
 async def _createVoiceChannel(
@@ -287,6 +321,8 @@ async def deleteVoiceChannel(
     bot: commands.Bot,
     voiceChannel: VoiceChannel,
     interaction: Interaction | None,
+    *,
+    rebalance: bool = True,
 ) -> bool:
     guild = _getVoiceChatGuild(bot)
     if guild is None:
@@ -306,13 +342,24 @@ async def deleteVoiceChannel(
 
     try:
         await liveChannel.delete()
+    except discord.NotFound:
+        log.info(
+            "Voice chat %s disappeared before deletion completed.",
+            int(liveChannel.id),
+        )
+        await handleDeletedVoiceChannel(bot, liveChannel)
+        if rebalance:
+            await _rebalanceVoiceChatCategory(bot)
+        await _safeEphemeral(interaction, "Voice chat was already deleted.")
+        return False
     except Exception:
         log.exception("Failed to delete vc %s.", liveChannel)
         await _safeEphemeral(interaction, "Failed to delete voice chat.")
         return False
 
     await handleDeletedVoiceChannel(bot, liveChannel)
-    await _rebalanceVoiceChatCategory(bot)
+    if rebalance:
+        await _rebalanceVoiceChatCategory(bot)
     await _safeEphemeral(interaction, "Deleted voice chat.")
     return True
 
@@ -339,9 +386,17 @@ async def deleteVoiceChannels(
 
     deletedCount = 0
     for voiceChannel in localCategoryTable:
-        deleted = await deleteVoiceChannel(bot=bot, voiceChannel=voiceChannel, interaction=None)
+        deleted = await deleteVoiceChannel(
+            bot=bot,
+            voiceChannel=voiceChannel,
+            interaction=None,
+            rebalance=False,
+        )
         if deleted:
             deletedCount += 1
+
+    if deletedCount > 0:
+        await _rebalanceVoiceChatCategory(bot)
 
     if deletedCount > 0:
         await _safeEphemeral(interaction, f"Deleted {deletedCount} `{category}` voice chat(s).")
@@ -416,9 +471,17 @@ async def cleanVoiceChatsCategory(bot: commands.Bot, interaction: Interaction) -
             log.info("%s is a permanent or unmanaged voice chat channel.", voiceChannel.name)
             continue
         log.info("Removing voice chat channel: %s", voiceChannel.name)
-        deleted = await deleteVoiceChannel(bot=bot, voiceChannel=voiceChannel, interaction=None)
+        deleted = await deleteVoiceChannel(
+            bot=bot,
+            voiceChannel=voiceChannel,
+            interaction=None,
+            rebalance=False,
+        )
         if deleted:
             deletedCount += 1
+
+    if deletedCount > 0:
+        await _rebalanceVoiceChatCategory(bot)
 
     await _safeEphemeral(interaction, f"Cleaned up {deletedCount} voice chat(s).")
     return deletedCount

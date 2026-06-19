@@ -159,12 +159,32 @@ async def rememberRobloxIdentity(
                     (discordUserId, robloxUserId, robloxUsername, source, guildId, confidence, updatedAt)
                 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(discordUserId) DO UPDATE SET
-                    robloxUserId = COALESCE(excluded.robloxUserId, roblox_identity_links.robloxUserId),
-                    robloxUsername = excluded.robloxUsername,
-                    source = excluded.source,
-                    guildId = excluded.guildId,
-                    confidence = excluded.confidence,
-                    updatedAt = datetime('now')
+                    robloxUserId = CASE
+                        WHEN roblox_identity_links.confidence <= excluded.confidence
+                        THEN COALESCE(excluded.robloxUserId, roblox_identity_links.robloxUserId)
+                        ELSE COALESCE(roblox_identity_links.robloxUserId, excluded.robloxUserId)
+                    END,
+                    robloxUsername = CASE
+                        WHEN roblox_identity_links.confidence <= excluded.confidence
+                        THEN excluded.robloxUsername
+                        ELSE roblox_identity_links.robloxUsername
+                    END,
+                    source = CASE
+                        WHEN roblox_identity_links.confidence <= excluded.confidence
+                        THEN excluded.source
+                        ELSE roblox_identity_links.source
+                    END,
+                    guildId = CASE
+                        WHEN roblox_identity_links.confidence <= excluded.confidence
+                        THEN excluded.guildId
+                        ELSE roblox_identity_links.guildId
+                    END,
+                    confidence = MAX(roblox_identity_links.confidence, excluded.confidence),
+                    updatedAt = CASE
+                        WHEN roblox_identity_links.confidence <= excluded.confidence
+                        THEN datetime('now')
+                        ELSE roblox_identity_links.updatedAt
+                    END
                 """,
                 (
                     safeDiscordId,
@@ -441,11 +461,64 @@ async def getStoredRobloxIdentity(discordId: int) -> Optional[RoverLookupResult]
     )
 
 
+async def getVerifiedRobloxIdentity(discordId: int) -> Optional[RoverLookupResult]:
+    try:
+        safeDiscordId = int(discordId)
+    except (TypeError, ValueError):
+        return None
+    if safeDiscordId <= 0:
+        return None
+    try:
+        row = await asyncio.wait_for(
+            fetchOne(
+                """
+                SELECT robloxUserId, robloxUsername, source
+                FROM roblox_identity_links
+                WHERE discordUserId = ?
+                  AND (source = 'rover' OR source LIKE 'jane-identity:oauth%')
+                """,
+                (safeDiscordId,),
+            ),
+            timeout=_identityDbTimeoutSec(),
+        )
+    except Exception:
+        return None
+    if not row:
+        return None
+    username = _cleanRobloxUsername(row.get("robloxUsername"))
+    if not username:
+        return None
+    try:
+        robloxId = int(row.get("robloxUserId") or 0) or None
+    except (TypeError, ValueError):
+        robloxId = None
+    try:
+        await asyncio.wait_for(
+            execute(
+                "UPDATE roblox_identity_links SET lastUsedAt = datetime('now') WHERE discordUserId = ?",
+                (safeDiscordId,),
+            ),
+            timeout=_identityDbTimeoutSec(),
+        )
+    except Exception:
+        pass
+    source = str(row.get("source") or "internal").strip() or "internal"
+    return RoverLookupResult(
+        robloxId,
+        username,
+        error=f"Using verified Roblox identity link ({source}).",
+    )
+
+
 async def _fallbackStoredRobloxIdentity(
     discordId: int,
     guildId: Optional[int],
     error: str,
+    *,
+    allowStoredFallback: bool = True,
 ) -> RoverLookupResult:
+    if not allowStoredFallback:
+        return RoverLookupResult(None, None, error=error)
     stored = await getStoredRobloxIdentity(discordId)
     if stored is not None:
         _roverCacheSet(discordId, guildId, stored)
@@ -464,7 +537,24 @@ def _roverResponseError(status: int, data: object, default: str = "RoVer lookup 
     return f"RoVer lookup failed ({int(status)})."
 
 
-async def fetchRobloxUser(discordId: int, guildId: Optional[int] = None) -> RoverLookupResult:
+async def fetchRobloxUser(
+    discordId: int,
+    guildId: Optional[int] = None,
+    *,
+    preferStored: Optional[bool] = None,
+    allowStoredFallback: bool = True,
+) -> RoverLookupResult:
+    useStored = (
+        bool(getattr(config, "janeIdentityPreferInternalLinks", True))
+        if preferStored is None
+        else bool(preferStored)
+    )
+    if useStored:
+        stored = await getStoredRobloxIdentity(discordId)
+        if stored is not None:
+            _roverCacheSet(discordId, guildId, stored)
+            return stored
+
     cached = _roverCacheGet(discordId, guildId)
     if cached is not None:
         return cached
@@ -485,13 +575,19 @@ async def fetchRobloxUser(discordId: int, guildId: Optional[int] = None) -> Rove
     try:
         status, data = await robloxTransport.requestJson("GET", url, headers=headers, timeoutSec=10)
     except Exception as exc:
-        return await _fallbackStoredRobloxIdentity(discordId, guildId, str(exc))
+        return await _fallbackStoredRobloxIdentity(
+            discordId,
+            guildId,
+            str(exc),
+            allowStoredFallback=allowStoredFallback,
+        )
 
     if status != 200 or not isinstance(data, dict):
         return await _fallbackStoredRobloxIdentity(
             discordId,
             guildId,
             _roverResponseError(status, data),
+            allowStoredFallback=allowStoredFallback,
         )
 
     if data.get("status") == "error" or data.get("success") is False:
@@ -499,6 +595,7 @@ async def fetchRobloxUser(discordId: int, guildId: Optional[int] = None) -> Rove
             discordId,
             guildId,
             _roverResponseError(status, data),
+            allowStoredFallback=allowStoredFallback,
         )
 
     robloxId, username = extractRobloxFields(data)
@@ -517,6 +614,7 @@ async def fetchRobloxUser(discordId: int, guildId: Optional[int] = None) -> Rove
             discordId,
             guildId,
             "No Roblox account linked via RoVer.",
+            allowStoredFallback=allowStoredFallback,
         )
 
     if not robloxId:
@@ -527,6 +625,19 @@ async def fetchRobloxUser(discordId: int, guildId: Optional[int] = None) -> Rove
     result = RoverLookupResult(robloxId, username)
     _roverCacheSet(discordId, guildId, result)
     return result
+
+
+async def fetchVerifiedRobloxUser(discordId: int, guildId: Optional[int] = None) -> RoverLookupResult:
+    stored = await getVerifiedRobloxIdentity(discordId)
+    if stored is not None:
+        _roverCacheSet(discordId, guildId, stored)
+        return stored
+    return await fetchRobloxUser(
+        discordId,
+        guildId,
+        preferStored=False,
+        allowStoredFallback=False,
+    )
 
 
 async def fetchRobloxUserByUsername(username: str) -> RoverLookupResult:

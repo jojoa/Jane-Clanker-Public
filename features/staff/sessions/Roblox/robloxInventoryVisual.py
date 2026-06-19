@@ -13,7 +13,20 @@ _extractCreatorName = robloxPayloads.extractCreatorName
 _optionalInt = robloxPayloads.optionalInt
 fetchRobloxAssetThumbnailHashes = robloxAssets.fetchRobloxAssetThumbnailHashes
 _imageHashDistance = robloxAssets.imageHashDistance
+_colorSignatureDistance = robloxAssets.colorSignatureDistance
+_visualSignatureDetailCompatible = robloxAssets.visualSignatureDetailCompatible
 _inventoryMatchPriority = robloxInventoryText.inventoryMatchPriority
+
+
+async def fetchRobloxAssetVisualSignatures(assetIds: list[int]) -> tuple[dict[int, dict[str, object]], Optional[str]]:
+    if fetchRobloxAssetThumbnailHashes is not robloxAssets.fetchRobloxAssetThumbnailHashes:
+        hashes, error = await fetchRobloxAssetThumbnailHashes(assetIds)
+        return {
+            int(assetId): {"thumbnailHash": str(hashValue).strip()}
+            for assetId, hashValue in dict(hashes or {}).items()
+            if int(assetId or 0) > 0 and str(hashValue).strip()
+        }, error
+    return await robloxAssets.fetchRobloxAssetVisualSignatures(assetIds)
 
 def _inventoryVisualMatchingEnabled() -> bool:
     return bool(getattr(config, "bgIntelligenceInventoryVisualMatchingEnabled", True))
@@ -27,6 +40,13 @@ def _inventoryVisualCandidateLimit() -> int:
     return max(0, min(configured, 300))
 
 
+def _inventoryVisualCollectionLimit() -> int:
+    candidateLimit = _inventoryVisualCandidateLimit()
+    if candidateLimit <= 0:
+        return 0
+    return max(candidateLimit, min(candidateLimit * 5, 1000))
+
+
 def _inventoryVisualReferenceLimit() -> int:
     try:
         configured = int(getattr(config, "bgIntelligenceInventoryVisualReferenceLimit", 80) or 80)
@@ -37,17 +57,29 @@ def _inventoryVisualReferenceLimit() -> int:
 
 def _inventoryVisualHashDistanceMax() -> int:
     try:
-        configured = int(getattr(config, "bgIntelligenceInventoryVisualHashDistanceMax", 3) or 3)
+        configured = int(getattr(config, "bgIntelligenceInventoryVisualHashDistanceMax", 6) or 6)
     except (TypeError, ValueError):
-        configured = 3
+        configured = 6
     return max(0, min(configured, 32))
+
+
+def _inventoryVisualColorMatchingEnabled() -> bool:
+    return bool(getattr(config, "bgIntelligenceInventoryVisualColorMatchingEnabled", True))
+
+
+def _inventoryVisualColorDistanceMax() -> float:
+    try:
+        configured = float(getattr(config, "bgIntelligenceInventoryVisualColorDistanceMax", 0.58) or 0.58)
+    except (TypeError, ValueError):
+        configured = 0.58
+    return max(0.0, min(configured, 1.0))
 
 
 def _inventoryVisualHashSize() -> int:
     try:
-        configured = int(getattr(config, "bgIntelligenceInventoryVisualHashSize", 8) or 8)
+        configured = int(getattr(config, "bgIntelligenceInventoryVisualHashSize", 16) or 16)
     except (TypeError, ValueError):
-        configured = 8
+        configured = 16
     return max(4, min(configured, 16))
 
 _INVENTORY_VISUAL_TYPE_MARKERS = (
@@ -211,16 +243,37 @@ def _inventoryCandidateEntryFromRaw(raw: dict) -> Optional[dict]:
     }
 
 
-async def _referenceVisualCategories(referenceIds: list[int]) -> tuple[dict[int, str], Optional[str]]:
+async def _referenceVisualMetadata(referenceIds: list[int]) -> tuple[dict[int, dict[str, object]], Optional[str]]:
     detailsById, error = await robloxAssets.fetchCatalogAssetPrices(referenceIds)
-    categories: dict[int, str] = {}
+    metadata: dict[int, dict[str, object]] = {}
     for assetId, details in dict(detailsById or {}).items():
         if not isinstance(details, dict):
             continue
         category = _visualCategoryFromType(details.get("assetTypeName"), details.get("assetTypeId"))
-        if category:
-            categories[int(assetId)] = category
-    return categories, error
+        assetTypeId = _optionalInt(details.get("assetTypeId"))
+        if category or assetTypeId is not None:
+            metadata[int(assetId)] = {
+                "name": details.get("name"),
+                "visualCategory": category,
+                "assetTypeId": int(assetTypeId) if assetTypeId is not None else None,
+            }
+    return metadata, error
+
+
+def _visualAssetTypesCompatible(
+    leftAssetTypeId: object,
+    rightAssetTypeId: object,
+    leftCategory: str,
+    rightCategory: str,
+) -> bool:
+    parsedLeft = _optionalInt(leftAssetTypeId)
+    parsedRight = _optionalInt(rightAssetTypeId)
+    if parsedLeft is None or parsedRight is None:
+        return True
+    if int(parsedLeft) == int(parsedRight):
+        return True
+    shoeCategories = {"left_shoe", "right_shoe", "shoe"}
+    return leftCategory in shoeCategories and rightCategory in shoeCategories
 
 
 def _appendInventoryVisualCandidate(
@@ -230,8 +283,8 @@ def _appendInventoryVisualCandidate(
 ) -> None:
     if not _inventoryVisualMatchingEnabled():
         return
-    candidateLimit = _inventoryVisualCandidateLimit()
-    if candidateLimit <= 0 or len(candidates) >= candidateLimit:
+    collectionLimit = _inventoryVisualCollectionLimit()
+    if collectionLimit <= 0 or len(candidates) >= collectionLimit:
         return
     if not _isInventoryVisualCandidate(raw):
         return
@@ -244,6 +297,39 @@ def _appendInventoryVisualCandidate(
     seenAssetIds.add(assetId)
     candidates.append(candidate)
 
+
+def _compatibleReferenceIdsForCandidate(
+    candidate: dict,
+    referenceIds: list[int],
+    referenceMetadata: dict[int, dict[str, object]],
+) -> tuple[list[int], str]:
+    candidateCategory = str(candidate.get("visualCategory") or "").strip()
+    if not candidateCategory:
+        return [], "unknown"
+    candidateAssetTypeId = _optionalInt(candidate.get("assetTypeId"))
+    sawUnknownReference = False
+    compatibleIds: list[int] = []
+    for referenceId in referenceIds:
+        referenceMeta = referenceMetadata.get(int(referenceId), {})
+        referenceCategory = str(referenceMeta.get("visualCategory") or "").strip()
+        referenceAssetTypeId = _optionalInt(referenceMeta.get("assetTypeId"))
+        if not _visualAssetTypesCompatible(
+            candidateAssetTypeId,
+            referenceAssetTypeId,
+            candidateCategory,
+            referenceCategory,
+        ):
+            continue
+        if _visualCategoriesCompatible(candidateCategory, referenceCategory):
+            compatibleIds.append(int(referenceId))
+            continue
+        if not referenceCategory:
+            sawUnknownReference = True
+    if compatibleIds:
+        return compatibleIds, ""
+    return [], "unknown" if sawUnknownReference else "type"
+
+
 def _inventoryPrimarySignal(entry: dict) -> dict:
     return {
         "matchType": entry.get("matchType"),
@@ -253,7 +339,9 @@ def _inventoryPrimarySignal(entry: dict) -> dict:
         "keyword": entry.get("keyword"),
         "fuzzyScore": entry.get("fuzzyScore"),
         "referenceItemId": entry.get("referenceItemId"),
+        "referenceItemName": entry.get("referenceItemName"),
         "visualDistance": entry.get("visualDistance"),
+        "visualColorDistance": entry.get("visualColorDistance"),
         "reason": entry.get("reason"),
     }
 
@@ -266,7 +354,9 @@ def _applyInventoryPrimarySignal(entry: dict, signal: dict) -> None:
     entry["keyword"] = signal.get("keyword")
     entry["fuzzyScore"] = signal.get("fuzzyScore")
     entry["referenceItemId"] = signal.get("referenceItemId")
+    entry["referenceItemName"] = signal.get("referenceItemName")
     entry["visualDistance"] = signal.get("visualDistance")
+    entry["visualColorDistance"] = signal.get("visualColorDistance")
     entry["reason"] = signal.get("reason")
 
 
@@ -287,6 +377,8 @@ async def _applyInventoryVisualMatches(
     candidateItems: list[dict],
     referenceItemIds: set[int],
     referenceHashes: Optional[dict[int, str]] = None,
+    referenceColorSignatures: Optional[dict[int, str]] = None,
+    referenceMetadata: Optional[dict[int, dict[str, object]]] = None,
 ) -> dict[str, object]:
     if not _inventoryVisualMatchingEnabled():
         return {"candidateCount": 0, "referenceCount": 0, "matchedCount": 0, "error": None}
@@ -295,12 +387,17 @@ async def _applyInventoryVisualMatches(
     if candidateLimit <= 0 or referenceLimit <= 0:
         return {"candidateCount": 0, "referenceCount": 0, "matchedCount": 0, "error": None}
 
-    candidates = [row for row in list(candidateItems or []) if isinstance(row, dict)][:candidateLimit]
+    candidates = [row for row in list(candidateItems or []) if isinstance(row, dict)]
     exactReferenceItemIds = {int(value) for value in list(referenceItemIds or set()) if int(value or 0) > 0}
     normalizedReferenceHashes = {
         int(assetId): str(hashValue).strip()
         for assetId, hashValue in dict(referenceHashes or {}).items()
         if int(assetId or 0) > 0 and str(hashValue).strip()
+    }
+    normalizedReferenceColorSignatures = {
+        int(assetId): str(colorSignature).strip()
+        for assetId, colorSignature in dict(referenceColorSignatures or {}).items()
+        if int(assetId or 0) > 0 and str(colorSignature).strip()
     }
     referenceIds = sorted(normalizedReferenceHashes.keys())[:referenceLimit]
     if normalizedReferenceHashes and referenceIds:
@@ -308,33 +405,125 @@ async def _applyInventoryVisualMatches(
             int(referenceId): normalizedReferenceHashes[int(referenceId)]
             for referenceId in referenceIds
         }
+        normalizedReferenceColorSignatures = {
+            int(referenceId): normalizedReferenceColorSignatures[int(referenceId)]
+            for referenceId in referenceIds
+            if int(referenceId) in normalizedReferenceColorSignatures
+        }
     referenceError = None
     if not normalizedReferenceHashes:
         referenceIds = sorted(int(value) for value in list(referenceItemIds or set()) if int(value or 0) > 0)[:referenceLimit]
         if not candidates or not referenceIds:
             return {"candidateCount": len(candidates), "referenceCount": len(referenceIds), "matchedCount": 0, "error": None}
-        normalizedReferenceHashes, referenceError = await fetchRobloxAssetThumbnailHashes(referenceIds)
+        referenceSignatures, referenceError = await fetchRobloxAssetVisualSignatures(referenceIds)
+        normalizedReferenceHashes = {
+            int(assetId): str(details.get("thumbnailHash") or "").strip()
+            for assetId, details in referenceSignatures.items()
+            if str(details.get("thumbnailHash") or "").strip()
+        }
+        normalizedReferenceColorSignatures = {
+            int(assetId): str(details.get("colorSignature") or "").strip()
+            for assetId, details in referenceSignatures.items()
+            if str(details.get("colorSignature") or "").strip()
+        }
         referenceIds = sorted(normalizedReferenceHashes.keys())[:referenceLimit]
     if not candidates or not referenceIds:
         return {"candidateCount": len(candidates), "referenceCount": len(referenceIds), "matchedCount": 0, "error": referenceError}
 
-    referenceCategories, referenceCategoryError = await _referenceVisualCategories(referenceIds)
-    candidateIds = [int(row.get("id") or 0) for row in candidates if int(row.get("id") or 0) > 0]
-    candidateHashes, candidateError = await fetchRobloxAssetThumbnailHashes(candidateIds)
+    normalizedReferenceMetadata: dict[int, dict[str, object]] = {}
+    for assetId, metadata in dict(referenceMetadata or {}).items():
+        if int(assetId or 0) <= 0 or not isinstance(metadata, dict):
+            continue
+        assetTypeId = _optionalInt(metadata.get("assetTypeId"))
+        category = str(metadata.get("visualCategory") or "").strip()
+        if not category:
+            category = _visualCategoryFromType(metadata.get("assetTypeName"), assetTypeId)
+        normalizedReferenceMetadata[int(assetId)] = {
+            "name": metadata.get("name") or metadata.get("assetName"),
+            "visualCategory": category,
+            "assetTypeId": int(assetTypeId) if assetTypeId is not None else None,
+        }
+    missingMetadataIds = [
+        int(referenceId)
+        for referenceId in referenceIds
+        if not str((normalizedReferenceMetadata.get(int(referenceId)) or {}).get("visualCategory") or "").strip()
+    ]
+    fetchedReferenceMetadata: dict[int, dict[str, object]] = {}
+    referenceCategoryError = None
+    if missingMetadataIds:
+        fetchedReferenceMetadata, referenceCategoryError = await _referenceVisualMetadata(missingMetadataIds)
+    normalizedReferenceMetadata.update(fetchedReferenceMetadata)
+    candidateReferenceIds: dict[int, list[int]] = {}
+    comparableCandidates: list[dict] = []
+    skippedTypeMismatchCount = 0
+    skippedUnknownTypeCount = 0
+    for candidate in candidates:
+        assetId = int(candidate.get("id") or 0)
+        if assetId <= 0:
+            continue
+        compatibleIds, skipReason = _compatibleReferenceIdsForCandidate(
+            candidate,
+            referenceIds,
+            normalizedReferenceMetadata,
+        )
+        if not compatibleIds:
+            if skipReason == "unknown":
+                skippedUnknownTypeCount += 1
+            elif skipReason == "type":
+                skippedTypeMismatchCount += 1
+            continue
+        candidateReferenceIds[int(assetId)] = compatibleIds
+        comparableCandidates.append(candidate)
+        if len(comparableCandidates) >= candidateLimit:
+            break
+
+    if not comparableCandidates:
+        combinedErrors = [value for value in (referenceError, referenceCategoryError) if value]
+        return {
+            "candidateCount": len(candidates),
+            "comparedCandidateCount": 0,
+            "referenceCount": len(referenceIds),
+            "matchedCount": 0,
+            "skippedTypeMismatchCount": skippedTypeMismatchCount,
+            "skippedUnknownTypeCount": skippedUnknownTypeCount,
+            "skippedColorMismatchCount": 0,
+            "skippedDetailMismatchCount": 0,
+            "error": "; ".join(combinedErrors[:3]) or None,
+        }
+
+    candidateIds = [int(row.get("id") or 0) for row in comparableCandidates if int(row.get("id") or 0) > 0]
+    candidateSignatures, candidateError = await fetchRobloxAssetVisualSignatures(candidateIds)
+    candidateHashes = {
+        int(assetId): str(details.get("thumbnailHash") or "").strip()
+        for assetId, details in candidateSignatures.items()
+        if str(details.get("thumbnailHash") or "").strip()
+    }
+    candidateColorSignatures = {
+        int(assetId): str(details.get("colorSignature") or "").strip()
+        for assetId, details in candidateSignatures.items()
+        if str(details.get("colorSignature") or "").strip()
+    }
     if not normalizedReferenceHashes or not candidateHashes:
         combinedErrors = [value for value in (referenceError, referenceCategoryError, candidateError) if value]
         return {
             "candidateCount": len(candidates),
+            "comparedCandidateCount": len(comparableCandidates),
             "referenceCount": len(referenceIds),
             "matchedCount": 0,
+            "skippedTypeMismatchCount": skippedTypeMismatchCount,
+            "skippedUnknownTypeCount": skippedUnknownTypeCount,
+            "skippedColorMismatchCount": 0,
+            "skippedDetailMismatchCount": 0,
             "error": "; ".join(combinedErrors[:3]) or None,
         }
 
     distanceMax = _inventoryVisualHashDistanceMax()
+    colorMatchingEnabled = _inventoryVisualColorMatchingEnabled()
+    colorDistanceMax = _inventoryVisualColorDistanceMax()
     matchedCount = 0
-    skippedTypeMismatchCount = 0
-    skippedUnknownTypeCount = 0
-    for candidate in candidates:
+    skippedColorMismatchCount = 0
+    skippedDetailMismatchCount = 0
+    for candidate in comparableCandidates:
         assetId = int(candidate.get("id") or 0)
         if assetId <= 0:
             continue
@@ -347,30 +536,46 @@ async def _applyInventoryVisualMatches(
             continue
         bestReferenceId = 0
         bestDistance: Optional[int] = None
-        for referenceId, referenceHash in normalizedReferenceHashes.items():
+        bestColorDistance: Optional[float] = None
+        for referenceId in candidateReferenceIds.get(assetId, []):
             if int(referenceId) == assetId and assetId in exactReferenceItemIds:
                 continue
-            referenceCategory = referenceCategories.get(int(referenceId), "")
-            if not _visualCategoriesCompatible(candidateCategory, referenceCategory):
-                if referenceCategory:
-                    skippedTypeMismatchCount += 1
-                else:
-                    skippedUnknownTypeCount += 1
+            referenceHash = normalizedReferenceHashes.get(int(referenceId))
+            if not referenceHash:
                 continue
             distance = _imageHashDistance(candidateHash, referenceHash)
             if distance is None or distance > distanceMax:
                 continue
+            colorDistance: Optional[float] = None
+            if colorMatchingEnabled:
+                if not _visualSignatureDetailCompatible(
+                    candidateColorSignatures.get(assetId),
+                    normalizedReferenceColorSignatures.get(int(referenceId)),
+                ):
+                    skippedDetailMismatchCount += 1
+                    continue
+                colorDistance = _colorSignatureDistance(
+                    candidateColorSignatures.get(assetId),
+                    normalizedReferenceColorSignatures.get(int(referenceId)),
+                )
+                if colorDistance is not None and colorDistance > colorDistanceMax:
+                    skippedColorMismatchCount += 1
+                    continue
             if bestDistance is None or distance < bestDistance:
                 bestDistance = distance
                 bestReferenceId = int(referenceId)
+                bestColorDistance = colorDistance
         if bestDistance is None or bestReferenceId <= 0:
             continue
+        bestReferenceMeta = normalizedReferenceMetadata.get(int(bestReferenceId), {})
         signal = {
             "matchType": "visual",
             "matchMode": "thumbnail_hash",
             "matchedField": "thumbnail",
             "referenceItemId": int(bestReferenceId),
+            "referenceItemName": bestReferenceMeta.get("name"),
             "visualDistance": int(bestDistance),
+            "visualColorDistance": round(float(bestColorDistance), 3) if bestColorDistance is not None else None,
             "reason": f"Thumbnail looked visually similar to flagged item `{int(bestReferenceId)}` (distance {int(bestDistance)}).",
         }
         existing = flaggedItemsById.get(assetId)
@@ -386,12 +591,16 @@ async def _applyInventoryVisualMatches(
     combinedErrors = [value for value in (referenceError, referenceCategoryError, candidateError) if value]
     return {
         "candidateCount": len(candidates),
+        "comparedCandidateCount": len(comparableCandidates),
         "referenceCount": len(referenceIds),
         "matchedCount": matchedCount,
         "skippedTypeMismatchCount": skippedTypeMismatchCount,
         "skippedUnknownTypeCount": skippedUnknownTypeCount,
+        "skippedColorMismatchCount": skippedColorMismatchCount,
+        "skippedDetailMismatchCount": skippedDetailMismatchCount,
         "error": "; ".join(combinedErrors[:3]) or None,
     }
 
 appendInventoryVisualCandidate = _appendInventoryVisualCandidate
 applyInventoryVisualMatches = _applyInventoryVisualMatches
+visualCategoryFromType = _visualCategoryFromType

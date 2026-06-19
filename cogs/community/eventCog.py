@@ -488,23 +488,10 @@ class EventCog(commands.Cog):
         activeEvents = await eventService.listActiveScheduledEvents()
         for event in activeEvents:
             messageId = int(event.get("messageId") or 0)
-            channelId = int(event.get("channelId") or 0)
             eventId = int(event.get("eventId") or 0)
             if messageId <= 0 or eventId <= 0:
                 continue
             self.bot.add_view(EventView(self, eventId), message_id=messageId)
-            if channelId > 0:
-                channel = await self._getMessageChannel(channelId)
-                if channel is not None:
-                    try:
-                        message = await channel.fetch_message(messageId)
-                    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                        message = None
-                    if message is not None:
-                        try:
-                            await message.edit(view=EventView(self, eventId))
-                        except (discord.Forbidden, discord.HTTPException):
-                            pass
             restored += 1
         return restored
 
@@ -516,6 +503,8 @@ class EventCog(commands.Cog):
         )
 
     async def _runEventReminderLoop(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(5)
         while True:
             try:
                 await self._runEventRemindersTick()
@@ -652,7 +641,7 @@ class EventCog(commands.Cog):
         creatorId = int(event.get("creatorId") or 0)
         return int(interaction.user.id) == creatorId
 
-    @app_commands.command(name="events", description="Show upcoming scheduled events.")
+    # Legacy slash handler kept for future reuse.
     async def events(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
             await self._safeEphemeral(interaction, "This command can only be used in a server.")
@@ -716,9 +705,7 @@ class EventCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="schedule-event", description="Create a scheduled event with RSVP buttons.")
-    @app_commands.describe(lock_rsvp_at_start="Lock RSVPs once the event starts.")
-    @app_commands.rename(lock_rsvp_at_start="lock-rsvp-at-start")
+    # Legacy slash handler kept for future reuse.
     async def event(
         self,
         interaction: discord.Interaction,
@@ -808,6 +795,7 @@ class EventCog(commands.Cog):
         await self._safeEphemeral(interaction, "Event created.")
 
     async def handleRsvp(self, interaction: discord.Interaction, eventId: int, response: str) -> None:
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
         event = await eventService.getScheduledEvent(int(eventId))
         if not event:
             await self._safeEphemeral(interaction, "This event no longer exists.")
@@ -894,6 +882,7 @@ class EventCog(commands.Cog):
         eventId: int,
         modal: EventEditModal,
     ) -> None:
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True, thinking=True)
         event = await eventService.getScheduledEvent(int(eventId))
         if not event:
             await self._safeEphemeral(interaction, "This event no longer exists.")
@@ -944,6 +933,7 @@ class EventCog(commands.Cog):
         await self._safeEphemeral(interaction, "Event updated.")
 
     async def deleteEvent(self, interaction: discord.Interaction, eventId: int) -> None:
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
         event = await eventService.getScheduledEvent(int(eventId))
         if not event:
             await self._safeEphemeral(interaction, "This event no longer exists.")

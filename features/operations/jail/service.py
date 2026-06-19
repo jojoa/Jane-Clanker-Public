@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from db.sqlite import execute, executeReturnId, fetchOne
+from db.sqlite import execute, fetchOne, runWriteTransaction
 
 
 def _jsonList(values: list[int]) -> str:
@@ -41,24 +41,36 @@ async def createJailRecord(
     unmanageableRoleIds: list[int],
     isolatedChannelIds: list[int],
 ) -> int:
-    await closeActiveJailRecord(guildId, userId)
-    return await executeReturnId(
-        """
-        INSERT INTO jail_records
-            (guildId, userId, jailedBy, jailedRoleId, jailChannelId, savedRoleIdsJson, unmanageableRoleIdsJson, isolatedChannelIdsJson, status, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', datetime('now'), datetime('now'))
-        """,
-        (
-            int(guildId),
-            int(userId),
-            int(jailedBy),
-            int(jailedRoleId),
-            int(jailChannelId) if jailChannelId else None,
-            _jsonList(savedRoleIds),
-            _jsonList(unmanageableRoleIds),
-            _jsonList(isolatedChannelIds),
-        ),
-    )
+    async def _tx(db) -> int:
+        await db.execute(
+            """
+            UPDATE jail_records
+            SET status = 'REPLACED',
+                updatedAt = datetime('now')
+            WHERE guildId = ? AND userId = ? AND status = 'ACTIVE'
+            """,
+            (int(guildId), int(userId)),
+        )
+        cur = await db.execute(
+            """
+            INSERT INTO jail_records
+                (guildId, userId, jailedBy, jailedRoleId, jailChannelId, savedRoleIdsJson, unmanageableRoleIdsJson, isolatedChannelIdsJson, status, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', datetime('now'), datetime('now'))
+            """,
+            (
+                int(guildId),
+                int(userId),
+                int(jailedBy),
+                int(jailedRoleId),
+                int(jailChannelId) if jailChannelId else None,
+                _jsonList(savedRoleIds),
+                _jsonList(unmanageableRoleIds),
+                _jsonList(isolatedChannelIds),
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+    return await runWriteTransaction(_tx)
 
 
 async def getActiveJailRecord(guildId: int, userId: int) -> Optional[dict]:

@@ -15,11 +15,6 @@ This is Jane's standalone background-check report command.
 
   Jane always runs the full scan route. There is no reduced-check command option.
 
-- `/bg-alt-link`
-  Records reviewer-authored alt relationship context for future scans.
-
-  Status options are `Confirmed alt`, `Related / allowed`, and `Cleared / not an alt`.
-
 The command is staff-only. Jane allows BG-certified reviewers and server managers/admins to use it.
 
 The public output posts in the channel where the command was used as Jane. Expand controls are locked to the reviewer who ran the scan, and they update the current message to show one public-safe expanded section at a time.
@@ -89,7 +84,7 @@ Known-member alt detection compares the scanned account's current and previous R
 
 Jane now also keeps a lightweight local identity graph. It stores scan-time Discord/Roblox observations, current and previous Roblox usernames, and group-membership fingerprints. That lets future scans notice exact Roblox ID reuse, Discord accounts cycling Roblox identities, stored previous-name collisions, lower-noise group overlap, and friend overlap with known members without keeping the full report dump.
 
-Reviewers can use `/bg-alt-link` to record a relationship as `Confirmed alt`, `Related / allowed`, or `Cleared / not an alt`. Confirmed and related links become strong future context. Cleared links suppress the relationship from becoming a name-only suspicion.
+Legacy alt-link rows still provide context when present. Confirmed and related links become strong future context. Cleared links suppress the relationship from becoming a name-only suspicion.
 
 Some rules are hard minimums instead of normal math:
 
@@ -100,7 +95,7 @@ Some rules are hard minimums instead of normal math:
 
 That means Jane will not do silly math like "known banned user, but the account is old, so probably fine." Bonk. Direct hits stay direct hits.
 
-Direct account rules can also have custom severity. In `/bg-flag`, the optional severity field is treated as the minimum score for `watchlist`, `roblox_user`, and `username` rules. Blank severity keeps Jane's default. `banned_user` can be raised above `95/100`, but not lowered below it.
+Flag proposals can store an approximate severity from `/bg-flag`: `Light`, `Medium`, `High`, or `SEVERE`. Direct-user rule creation is no longer exposed in the add-flag flow; staff should use the remaining group, keyword, item, creator, badge, favorite-game, and favorite-game-keyword proposal types.
 
 Jane can also return `Not scored` instead of a number:
 
@@ -157,9 +152,9 @@ The action buttons below a completed scan provide quick access to the Roblox pro
 
 Jane caches expensive Roblox reads in memory so repeated scans do not re-walk the same heavy data immediately. Badge award-date lookups are intentionally paced to avoid Roblox 429s, and asset/gamepass value lookups run behind small concurrency caps. When inventory already returns owned gamepass IDs, Jane prices those IDs directly instead of making a separate gamepass inventory listing call.
 
-Visual thumbnail matching only uses validated exact `item` rules. Jane stores a thumbnail hash for each usable flagged asset and ignores item IDs whose thumbnails do not currently resolve. Jane also looks up the Roblox asset type for the reference and the scanned candidate, then skips hash comparisons when the types do not match. That keeps the visual matcher tied to real, reviewable Roblox assets instead of arbitrary numbers and avoids cross-type false positives.
+Visual thumbnail matching only uses validated exact `item` rules. Jane stores a content-focused thumbnail hash and compact color signature for each usable flagged asset and ignores item IDs whose thumbnails do not currently resolve. The hash builder removes the thumbnail background and standard face marks before hashing, and classifies very low-detail neutral clothing separately from detailed/colorful clothing. That means a white tank top can still produce a visual signature, but it should not match camo, orange, black graphic, or other detailed outfits. Jane also looks up the Roblox asset type for the reference and the scanned candidate, then skips hash comparisons when the types do not match. Color is used as a blocker, not as an independent match source: Jane first requires the content hash to be close, then rejects palette/detail mismatches. That keeps the visual matcher tied to real, reviewable Roblox assets instead of arbitrary numbers and avoids cross-type false positives.
 
-Jane also has a separate item review queue for failed BGCs. Jane now watches recent BGC spreadsheets in the configured folder and looks for rows whose `Entry` column is explicitly set to `Denied`. Those denied rows can enqueue newly seen wearable inventory items into the review channel. Reviewers can mark queued items as flagged or safe, and flagged decisions require a note. Flagged queue items also become future visual-match references even if they were never added as manual `/bg-flag item` rules.
+Jane also has a separate review channel for BG item disputes and flag proposals. `/bg-flag` posts proposed flag rules into that channel as reviewer votes; Jane creates the rule immediately with the proposer counted as one `Flag` vote, and only removes it if `Not a Flag` votes outnumber `Flag` votes. Proposal votes close after `24` hours; active vote buttons are restored after restart only while that window is still open. The old denied-spreadsheet inventory sweep that posted many candidate items from a user's inventory has been removed.
 
 The pages are:
 
@@ -269,6 +264,8 @@ The main toggles live in `config.py`:
 - `bgIntelligenceInventoryVisualReferenceLimit`
 - `bgIntelligenceInventoryVisualHashDistanceMax`
 - `bgIntelligenceInventoryVisualHashSize`
+- `bgIntelligenceInventoryVisualColorMatchingEnabled`
+- `bgIntelligenceInventoryVisualColorDistanceMax`
 - `bgIntelligenceGamepassMaxPages`
 - `bgIntelligenceGamepassHardMaxPages`
 - `bgIntelligenceBadgeHistoryPageSize`
@@ -308,9 +305,9 @@ Flag rules come from the same BG flag manager as the existing scan code:
 
 - `/bg-flag`
 
-The flag manager now has a `Sync Visual Refs` button. Use it after bulk item-rule edits or whenever you want Jane to revalidate the thumbnail-hash reference set.
+The flag manager posts new rules as active votes in the BG item review channel. The `Add Flag` flow uses dropdowns for rule type and approximate severity, then asks for the value and optional note. Vote webhooks persist across restarts until their `24` hour voting window closes; after that Jane leaves the rule active unless `Not a Flag` votes already outnumbered `Flag` votes. The flag manager also has a `Sync Visual Refs` button. Use it after bulk item-rule edits or whenever you want Jane to revalidate the thumbnail-hash reference set.
 
-The failed-user item queue uses these config values:
+The BG item review/proposal channel uses these config values:
 
 - `bgItemReviewQueueEnabled`
 - `bgItemReviewQueueChannelId`
@@ -318,40 +315,22 @@ The failed-user item queue uses these config values:
 - `bgItemReviewWebhookName`
 - `bgItemReviewMaxPagesPerType`
 - `bgItemReviewCandidateLimit`
-- `bgItemReviewSpreadsheetSyncEnabled`
-- `bgItemReviewSpreadsheetSyncIntervalSec`
-- `bgItemReviewSpreadsheetStartupLookbackDays`
-- `bgItemReviewSpreadsheetRecurringLookbackDays`
-- `bgItemReviewSpreadsheetSyncScanLimit`
-- `bgItemReviewSpreadsheetSyncMaxRows`
 
-Staff can inspect the queue with:
-
-- `/bg-item-review-status`
-- `/bg-item-review`
-- `/bg-item-review-sync`
-
-After startup, Jane's first scheduled spreadsheet sync uses the wider startup lookback window as a catch-up pass. After that, the recurring sync only looks at spreadsheets modified within the shorter recurring lookback window. The scan limit still caps how many recent spreadsheets she will inspect in one pass.
-
-Supported rule types are still:
+Supported add-flow rule types are:
 
 - `group`
-- `username`
-- `roblox_user`
-- `watchlist`
-- `banned_user`
 - `keyword`
-- `group_keyword`
-- `item_keyword`
 - `item`
 - `creator`
 - `badge`
 - `game`
 - `game_keyword`
 
-The optional severity field mostly matters for direct-user rules. For example, a watchlist item can be severity `45` for "manual review please" or `90` for "this is practically an escalation." Non-direct rules may store severity for future use, but Jane does not currently score group/item/badge rules from that field.
+The severity dropdown is intentionally approximate: `Light`, `Medium`, `High`, or `SEVERE`. Non-direct rules may store severity for future use, but Jane does not currently score group/item/badge rules from that field.
 
-Exact `item` rules now have an extra constraint: Jane expects them to resolve to a valid Roblox thumbnail before they can be added through `/bg-flag`. The exact rule still drives exact-ID matching, and the validated thumbnail hash feeds visual similarity matching.
+Exact `item` proposals have an extra constraint: Jane expects them to resolve to a valid Roblox thumbnail before she posts the vote. While the proposal remains active, the exact rule drives exact-ID matching, and the validated thumbnail hash feeds visual similarity matching.
+
+Developer maintenance command: `!JaneFlagSync [all|history-limit]` scans the configured BG item review channel for historical Jane flag vote embeds, imports non-rejected rules into `bg_flag_rules`, and forces item visual-reference validation so catalog item rules rebuild their thumbnail hash and color signature rows. The command is intentionally hidden and developer-gated.
 
 ## Safe Edit Notes
 

@@ -8,57 +8,86 @@ from discord.ext import commands
 
 import config
 from features.staff.bgItemReview import service as itemReviewService
+from features.staff.bgItemReview import workflow as itemReviewWorkflow
 from features.staff.bgflags import service as flagService
 from runtime import interaction as interactionRuntime
 from runtime import viewBases as runtimeViewBases
-from features.staff.sessions.Roblox import robloxBadges
+from runtime import webhooks as runtimeWebhooks
+from features.staff.sessions.Roblox import robloxAssets, robloxBadges, robloxThumbnails
 
 _modsOnlyMessage = "Mods only."
 
-_flagTypeChoices = [
-    app_commands.Choice(name="Group", value="group"),
-    app_commands.Choice(name="Username", value="username"),
-    app_commands.Choice(name="Roblox User ID", value="roblox_user"),
-    app_commands.Choice(name="Watchlist User ID", value="watchlist"),
-    app_commands.Choice(name="Banned User ID", value="banned_user"),
-    app_commands.Choice(name="Keyword", value="keyword"),
-    app_commands.Choice(name="Group Keyword", value="group_keyword"),
-    app_commands.Choice(name="Item Keyword", value="item_keyword"),
-    app_commands.Choice(name="Item", value="item"),
-    app_commands.Choice(name="Creator", value="creator"),
-    app_commands.Choice(name="Badge", value="badge"),
-    app_commands.Choice(name="Favorite Game", value="game"),
-    app_commands.Choice(name="Favorite Game Keyword", value="game_keyword"),
+_addableFlagTypeChoices = [
+    discord.SelectOption(label="Group", value="group", description="Flag membership in a Roblox group ID."),
+    discord.SelectOption(label="Keyword", value="keyword", description="Flag matching text found in groups or items."),
+    discord.SelectOption(label="Item", value="item", description="Flag an exact Roblox catalog item ID."),
+    discord.SelectOption(label="Creator", value="creator", description="Flag items made by a Roblox creator ID."),
+    discord.SelectOption(label="Badge", value="badge", description="Flag a Roblox badge ID."),
+    discord.SelectOption(label="Favorite Game", value="game", description="Flag a Roblox favorite game/universe ID."),
+    discord.SelectOption(label="Favorite Game Keyword", value="game_keyword", description="Flag matching favorite game text."),
 ]
-_flagTypeValues = {choice.value for choice in _flagTypeChoices}
-_numericRuleTypes = {"group", "item", "creator", "badge", "roblox_user", "watchlist", "banned_user", "game"}
+_addableFlagTypeValues = {str(choice.value) for choice in _addableFlagTypeChoices}
+_addableNumericRuleTypes = {"group", "item", "creator", "badge", "game"}
+_severityChoices = [
+    discord.SelectOption(label="Light", value="25", description="Low confidence or mild relevance."),
+    discord.SelectOption(label="Medium", value="50", description="Normal flag strength.", default=True),
+    discord.SelectOption(label="High", value="75", description="Strong flag strength."),
+    discord.SelectOption(label="SEVERE", value="100", description="Highest severity."),
+]
+_severityLabels = {
+    0: "default",
+    25: "Light",
+    50: "Medium",
+    75: "High",
+    100: "SEVERE",
+}
 _rulesCategoryChoices = [
     discord.SelectOption(label="Groups", value="groups"),
-    discord.SelectOption(label="Direct Users", value="users"),
     discord.SelectOption(label="Items / Accessories", value="items"),
     discord.SelectOption(label="Favorite Games", value="games"),
     discord.SelectOption(label="Keywords", value="keywords"),
     discord.SelectOption(label="Badges", value="badges"),
+    discord.SelectOption(label="Legacy / Other", value="legacy"),
 ]
 _rulesCategoryTypeMap = {
     "groups": {"group"},
-    "users": {"roblox_user", "watchlist", "banned_user"},
     "items": {"item", "creator"},
     "games": {"game", "game_keyword"},
-    "keywords": {"keyword", "username", "group_keyword", "item_keyword", "game_keyword"},
+    "keywords": {"keyword", "group_keyword", "item_keyword", "game_keyword"},
     "badges": {"badge"},
+    "legacy": {"username", "roblox_user", "watchlist", "banned_user"},
 }
 
 
 def _hasModPerm(member: discord.Member) -> bool:
-    roleId = getattr(config, "moderatorRoleId", None)
-    if roleId is None:
+    rawRoleIds = (
+        getattr(config, "moderatorRoleId", None),
+        getattr(config, "bgReviewModeratorRoleId", None),
+        getattr(config, "bgItemReviewReviewerRoleId", None),
+    )
+    roleIds = {
+        int(rawRoleId)
+        for rawRoleId in rawRoleIds
+        if rawRoleId is not None and int(rawRoleId or 0) > 0
+    }
+    if not roleIds:
         return True
-    return any(int(role.id) == int(roleId) for role in member.roles)
+    return any(int(role.id) in roleIds for role in member.roles)
+
+
+def _isOpenBgFlagGuild(guildId: int) -> bool:
+    configured = getattr(config, "bgFlagOpenGuildIds", []) or []
+    try:
+        return int(guildId or 0) in {int(rawId) for rawId in configured if int(rawId or 0) > 0}
+    except (TypeError, ValueError):
+        return False
 
 
 async def _requireModPermission(interaction: discord.Interaction) -> bool:
     member = interaction.user
+    guildId = int(getattr(getattr(interaction, "guild", None), "id", 0) or 0)
+    if _isOpenBgFlagGuild(guildId):
+        return True
     if isinstance(member, discord.Member) and _hasModPerm(member):
         return True
     await interactionRuntime.safeInteractionReply(
@@ -69,23 +98,119 @@ async def _requireModPermission(interaction: discord.Interaction) -> bool:
     return False
 
 
-def _normalizeRuleType(value: str) -> Optional[str]:
+def _normalizeAddableRuleType(value: str) -> Optional[str]:
     normalized = str(value or "").strip().lower()
-    if normalized in _flagTypeValues:
+    if normalized in _addableFlagTypeValues:
         return normalized
     return None
 
 
-def _rulesListText(rules: list[dict]) -> str:
-    lines: list[str] = []
-    for rule in rules[:40]:
-        note = f" - {rule['note']}" if rule.get("note") else ""
-        severity = int(rule.get("severity") or 0)
-        severityText = f" severity={severity}" if severity > 0 else ""
-        lines.append(f"#{rule['ruleId']} [{rule['ruleType']}] {rule['ruleValue']}{severityText}{note}")
-    if len(rules) > 40:
-        lines.append(f"... and {len(rules) - 40} more")
-    return "\n".join(lines)
+def _normalizeSeverityChoice(value: object) -> int:
+    try:
+        severity = int(value or 50)
+    except (TypeError, ValueError):
+        return 50
+    if severity in _severityLabels and severity > 0:
+        return severity
+    return 50
+
+
+def _severityText(value: object) -> str:
+    severity = flagService.normalizeSeverity(value)
+    label = _severityLabels.get(severity)
+    if label:
+        return label if severity > 0 else "default"
+    return str(severity) if severity > 0 else "default"
+
+
+def _ruleValueLabel(ruleType: str) -> str:
+    return {
+        "group": "Roblox Group ID",
+        "keyword": "Keyword",
+        "item": "Roblox Item ID",
+        "creator": "Roblox Creator ID",
+        "badge": "Roblox Badge ID",
+        "game": "Roblox Universe ID",
+        "game_keyword": "Favorite Game Keyword",
+    }.get(str(ruleType or "").strip().lower(), "Rule Value")
+
+
+def _ruleValuePlaceholder(ruleType: str) -> str:
+    return {
+        "group": "Example: 5502618",
+        "keyword": "Example: suspicious phrase",
+        "item": "Example: 123456789",
+        "creator": "Example: 123456789",
+        "badge": "Example: 123456789",
+        "game": "Example: 123456789",
+        "game_keyword": "Example: game keyword",
+    }.get(str(ruleType or "").strip().lower(), "ID or keyword")
+
+
+def _thumbnailUrlFromRows(rows: list[dict], targetId: int) -> Optional[str]:
+    for row in list(rows or []):
+        if int(row.get("id") or row.get("targetId") or 0) != int(targetId):
+            continue
+        imageUrl = str(row.get("imageUrl") or "").strip()
+        state = str(row.get("state") or "").strip().lower()
+        if imageUrl and state in {"", "completed"}:
+            return imageUrl
+    return None
+
+
+async def _proposalPreviewImageUrl(proposal: dict) -> Optional[str]:
+    ruleType = str(proposal.get("ruleType") or "").strip().lower()
+    if ruleType not in {"item", "group", "badge", "game"}:
+        return None
+    try:
+        targetId = int(str(proposal.get("ruleValue") or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if targetId <= 0:
+        return None
+
+    try:
+        if ruleType == "item":
+            result = await robloxAssets.fetchRobloxAssetThumbnails([targetId])
+            return _thumbnailUrlFromRows(list(result.thumbnails or []), targetId)
+        thumbnailKind = {
+            "group": "group",
+            "badge": "badge",
+            "game": "game",
+        }.get(ruleType)
+        if not thumbnailKind:
+            return None
+        return await robloxThumbnails.fetchRobloxThumbnailUrl(thumbnailKind, targetId)
+    except Exception:
+        return None
+
+
+def _normalizeRuleValue(ruleType: str, rawValue: object) -> tuple[str | None, str | None]:
+    normalizedRuleType = _normalizeAddableRuleType(ruleType)
+    if not normalizedRuleType:
+        return None, "Invalid rule type."
+
+    valueText = str(rawValue or "").strip()
+    if not valueText:
+        return None, "Rule value is required."
+
+    if normalizedRuleType in _addableNumericRuleTypes:
+        try:
+            parsed = int(valueText)
+        except ValueError:
+            return None, f"{_ruleValueLabel(normalizedRuleType)} must be numeric."
+        if parsed <= 0:
+            return None, f"{_ruleValueLabel(normalizedRuleType)} must be greater than 0."
+        return str(parsed), None
+    return valueText.lower(), None
+
+
+def _proposalDecision(counts: dict[str, int]) -> str:
+    flagVotes = int(counts.get(flagService.PROPOSAL_VOTE_FLAG, 0) or 0)
+    notFlagVotes = int(counts.get(flagService.PROPOSAL_VOTE_NOT_FLAG, 0) or 0)
+    if notFlagVotes > flagVotes:
+        return flagService.PROPOSAL_STATUS_REJECTED
+    return ""
 
 
 def _ruleField(rule: dict) -> tuple[str, str]:
@@ -97,7 +222,7 @@ def _ruleField(rule: dict) -> tuple[str, str]:
     fieldName = f"#{ruleId} [{ruleType}]"
     fieldValue = (
         f"Value: `{ruleValue}`\n"
-        f"Severity: `{severity if severity > 0 else 'default'}`\n"
+        f"Severity: `{_severityText(severity)}`\n"
         f"Note: {note if note else '(none)'}"
     )
     return fieldName, fieldValue
@@ -156,6 +281,154 @@ def _buildQueueFlagEmbed(queueRows: list[dict]) -> discord.Embed:
     if len(queueRows) > 15:
         embed.set_footer(text=f"Showing 15 of {len(queueRows)} flagged queue items.")
     return embed
+
+
+async def _buildProposalEmbed(proposal: dict) -> discord.Embed:
+    proposalId = int(proposal.get("proposalId") or 0)
+    status = flagService.normalizeProposalStatus(proposal.get("status"))
+    counts = await flagService.proposalVoteCounts(proposalId)
+    flagVotes = int(counts.get(flagService.PROPOSAL_VOTE_FLAG, 0) or 0)
+    notFlagVotes = int(counts.get(flagService.PROPOSAL_VOTE_NOT_FLAG, 0) or 0)
+
+    statusLabel = {
+        flagService.PROPOSAL_STATUS_OPEN: "Active / Voting",
+        flagService.PROPOSAL_STATUS_APPROVED: "Approved",
+        flagService.PROPOSAL_STATUS_REJECTED: "Rejected / Removed",
+        flagService.PROPOSAL_STATUS_CLOSED: "Closed",
+    }.get(status, status.title())
+    color = discord.Color.blurple()
+    if status == flagService.PROPOSAL_STATUS_APPROVED:
+        color = discord.Color.red()
+    elif status == flagService.PROPOSAL_STATUS_REJECTED:
+        color = discord.Color.green()
+    elif status == flagService.PROPOSAL_STATUS_CLOSED:
+        color = discord.Color.dark_grey()
+
+    embed = discord.Embed(
+        title=f"BG Flag Vote #{proposalId}",
+        description=f"Status: **{statusLabel}**",
+        color=color,
+    )
+    embed.add_field(name="Rule Type", value=f"`{str(proposal.get('ruleType') or '').strip()}`", inline=True)
+    embed.add_field(name="Value", value=f"`{str(proposal.get('ruleValue') or '').strip()}`", inline=True)
+    embed.add_field(name="Severity", value=f"`{_severityText(proposal.get('severity'))}`", inline=True)
+    note = str(proposal.get("note") or "").strip()
+    if note:
+        embed.add_field(name="Note", value=note[:1024], inline=False)
+    proposedBy = int(proposal.get("proposedBy") or 0)
+    if proposedBy > 0:
+        embed.add_field(name="Proposed By", value=f"<@{proposedBy}>", inline=True)
+    embed.add_field(
+        name="Votes",
+        value=(
+            f"Flag: `{flagVotes}`\n"
+            f"Not a flag: `{notFlagVotes}`\n"
+            "Rule is removed only if `Not a Flag` votes outnumber `Flag` votes.\n"
+            f"Votes close after `{flagService.PROPOSAL_VOTE_WINDOW_HOURS}` hours."
+        ),
+        inline=True,
+    )
+    resultingRuleId = int(proposal.get("resultingRuleId") or 0)
+    if resultingRuleId > 0:
+        if status == flagService.PROPOSAL_STATUS_REJECTED:
+            resultText = f"Rule `#{resultingRuleId}` was removed."
+        else:
+            resultText = f"Rule `#{resultingRuleId}` is active."
+        embed.add_field(name="Rule", value=resultText, inline=False)
+    previewImageUrl = await _proposalPreviewImageUrl(proposal)
+    if previewImageUrl:
+        embed.set_thumbnail(url=previewImageUrl)
+    if status == flagService.PROPOSAL_STATUS_CLOSED:
+        embed.set_footer(text="Voting is closed. The rule remains active.")
+    else:
+        embed.set_footer(text="Reviewers can change their vote while this proposal remains active.")
+    return embed
+
+
+def _viewForProposal(proposal: dict) -> "BgFlagProposalVoteView":
+    view = BgFlagProposalVoteView(int(proposal.get("proposalId") or 0))
+    if flagService.normalizeProposalStatus(proposal.get("status")) != flagService.PROPOSAL_STATUS_OPEN:
+        for child in view.children:
+            child.disabled = True
+    return view
+
+
+async def _refreshProposalMessage(
+    botClient: discord.Client,
+    proposalId: int,
+    *,
+    message: discord.Message | None = None,
+) -> bool:
+    proposal = await flagService.getProposal(int(proposalId))
+    if not proposal:
+        return False
+    channelId = int(proposal.get("channelId") or 0)
+    messageId = int(proposal.get("messageId") or 0)
+    if message is None and channelId > 0 and messageId > 0:
+        message = await itemReviewWorkflow._fetchMessage(
+            botClient,
+            channelId=channelId,
+            messageId=messageId,
+        )
+    if message is None:
+        return False
+
+    guildId = int(proposal.get("guildId") or 0)
+    webhookName = itemReviewWorkflow._webhookName(guildId)
+    embed = await _buildProposalEmbed(proposal)
+    view = _viewForProposal(proposal)
+    edited = await runtimeWebhooks.editOwnedWebhookMessage(
+        botClient=botClient,
+        message=message,
+        webhookName=webhookName,
+        embed=embed,
+        view=view,
+        reason="Jane BG flag proposal update",
+    )
+    if edited:
+        return True
+    return await interactionRuntime.safeMessageEdit(message, embed=embed, view=view)
+
+
+async def _postProposalMessage(
+    botClient: discord.Client,
+    proposal: dict,
+) -> dict[str, int | str | bool]:
+    guildId = int(proposal.get("guildId") or 0)
+    channelId = itemReviewWorkflow._queueChannelId(guildId)
+    channel = await itemReviewWorkflow._resolveChannel(botClient, channelId)
+    if channel is None:
+        return {"ok": False, "reason": "BG item review queue channel is not configured or could not be resolved."}
+
+    webhookName = itemReviewWorkflow._webhookName(guildId)
+    embed = await _buildProposalEmbed(proposal)
+    view = _viewForProposal(proposal)
+    sentMessage = await runtimeWebhooks.sendOwnedWebhookMessageDetailed(
+        botClient=botClient,
+        channel=channel,
+        webhookName=webhookName,
+        embed=embed,
+        view=view,
+        username="Jane Item Review",
+        reason="Jane BG flag proposal",
+    )
+    if sentMessage is None:
+        sentMessage = await interactionRuntime.safeChannelSend(channel, embed=embed, view=view)
+        if sentMessage is None:
+            return {"ok": False, "reason": "Jane could not post the flag vote in the item review channel."}
+        if hasattr(botClient, "add_view"):
+            botClient.add_view(view, message_id=int(sentMessage.id))
+
+    await flagService.setProposalMessage(
+        int(proposal.get("proposalId") or 0),
+        channelId=int(getattr(sentMessage.channel, "id", channelId) or channelId),
+        messageId=int(sentMessage.id),
+    )
+    return {
+        "ok": True,
+        "channelId": int(getattr(sentMessage.channel, "id", channelId) or channelId),
+        "messageId": int(sentMessage.id),
+    }
 
 
 class BgRulesPanelView(discord.ui.View):
@@ -258,105 +531,236 @@ class BgRulesPanelView(discord.ui.View):
         await self._refresh(interaction)
 
 
-class BgFlagAddRuleModal(discord.ui.Modal, title="Add BG Flag Rule"):
-    ruleType = discord.ui.TextInput(
-        label="Rule Type",
-        placeholder="group / username / roblox_user / watchlist / banned_user / keyword / item / badge / game",
-        required=True,
-        max_length=32,
+class BgFlagProposalVoteView(discord.ui.View):
+    def __init__(self, proposalId: int) -> None:
+        super().__init__(timeout=None)
+        self.proposalId = int(proposalId)
+        self.flagBtn.custom_id = f"bgflagproposal:flag:{self.proposalId}"
+        self.notFlagBtn.custom_id = f"bgflagproposal:notflag:{self.proposalId}"
+
+    async def _vote(self, interaction: discord.Interaction, vote: str) -> None:
+        if not await _requireModPermission(interaction):
+            return
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
+
+        proposal = await flagService.getProposal(self.proposalId)
+        if not proposal:
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="This flag proposal no longer exists.",
+                ephemeral=True,
+            )
+            return
+        status = flagService.normalizeProposalStatus(proposal.get("status"))
+        if status == flagService.PROPOSAL_STATUS_OPEN and await flagService.closeExpiredProposal(self.proposalId):
+            await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
+            await _refreshProposalMessage(
+                interaction.client,
+                self.proposalId,
+                message=interaction.message,
+            )
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content=(
+                    f"Voting for this flag proposal closed after "
+                    f"{flagService.PROPOSAL_VOTE_WINDOW_HOURS} hours. The rule remains active."
+                ),
+                ephemeral=True,
+            )
+            return
+        if status == flagService.PROPOSAL_STATUS_OPEN:
+            proposal = await flagService.getProposal(self.proposalId) or proposal
+            status = flagService.normalizeProposalStatus(proposal.get("status"))
+        if status != flagService.PROPOSAL_STATUS_OPEN:
+            closedText = (
+                "Voting for this flag proposal has closed."
+                if status == flagService.PROPOSAL_STATUS_CLOSED
+                else "This flag proposal is already resolved."
+            )
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content=closedText,
+                ephemeral=True,
+            )
+            return
+
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
+        await flagService.upsertProposalVote(
+            self.proposalId,
+            voterId=int(interaction.user.id),
+            vote=vote,
+        )
+        counts = await flagService.proposalVoteCounts(self.proposalId)
+        decision = _proposalDecision(counts)
+        reply = "Vote recorded."
+
+        if decision == flagService.PROPOSAL_STATUS_REJECTED:
+            rejected = await flagService.rejectProposal(
+                self.proposalId,
+                resolvedBy=int(interaction.user.id),
+            )
+            if rejected:
+                if str(proposal.get("ruleType") or "").strip().lower() == "item":
+                    syncResult = await flagService.syncItemVisualReferences(force=False)
+                    reply = (
+                        "Vote recorded. Not-a-flag votes now outnumber flag votes, so Jane removed the rule. "
+                        f"Visual refs synced: {_formatVisualRefSyncResult(syncResult)}."
+                    )
+                else:
+                    reply = "Vote recorded. Not-a-flag votes now outnumber flag votes, so Jane removed the rule."
+        else:
+            reply = "Vote recorded. The rule remains active."
+
+        await _refreshProposalMessage(
+            interaction.client,
+            self.proposalId,
+            message=interaction.message,
+        )
+        await interactionRuntime.safeInteractionReply(
+            interaction,
+            content=reply,
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Flag", style=discord.ButtonStyle.danger, row=0)
+    async def flagBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._vote(interaction, flagService.PROPOSAL_VOTE_FLAG)
+
+    @discord.ui.button(label="Not a Flag", style=discord.ButtonStyle.success, row=0)
+    async def notFlagBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._vote(interaction, flagService.PROPOSAL_VOTE_NOT_FLAG)
+
+
+class BgFlagAddRuleSetupView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=300)
+        self.selectedRuleType = ""
+        self.selectedSeverity = 50
+
+    @discord.ui.select(
+        row=0,
+        options=_addableFlagTypeChoices,
+        placeholder="Choose flag type",
+        min_values=1,
+        max_values=1,
     )
-    value = discord.ui.TextInput(
-        label="Rule Value",
-        placeholder="ID (numeric) or lowercase value/keyword",
-        required=True,
-        max_length=200,
+    async def ruleTypeSelect(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        self.selectedRuleType = _normalizeAddableRuleType(select.values[0] if select.values else "") or ""
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
+
+    @discord.ui.select(
+        row=1,
+        options=_severityChoices,
+        placeholder="Choose severity",
+        min_values=1,
+        max_values=1,
     )
-    note = discord.ui.TextInput(
-        label="Note (optional)",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=300,
-    )
-    severity = discord.ui.TextInput(
-        label="Severity / min score (optional)",
-        placeholder="1-100. Blank uses Jane's default for this rule type.",
-        required=False,
-        max_length=3,
-    )
+    async def severitySelect(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        self.selectedSeverity = _normalizeSeverityChoice(select.values[0] if select.values else 50)
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary, row=2)
+    async def continueBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not await _requireModPermission(interaction):
+            return
+        normalizedRuleType = _normalizeAddableRuleType(self.selectedRuleType)
+        if not normalizedRuleType:
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="Choose a flag type first.",
+                ephemeral=True,
+            )
+            return
+        await interactionRuntime.safeInteractionSendModal(
+            interaction,
+            BgFlagAddRuleDetailsModal(normalizedRuleType, self.selectedSeverity),
+        )
+
+
+class BgFlagAddRuleDetailsModal(discord.ui.Modal, title="Propose BG Flag"):
+    def __init__(self, ruleType: str, severity: int) -> None:
+        super().__init__()
+        self.ruleType = _normalizeAddableRuleType(ruleType) or ""
+        self.severity = _normalizeSeverityChoice(severity)
+        self.value = discord.ui.TextInput(
+            label=_ruleValueLabel(self.ruleType),
+            placeholder=_ruleValuePlaceholder(self.ruleType),
+            required=True,
+            max_length=200,
+        )
+        self.note = discord.ui.TextInput(
+            label="Note (optional)",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=300,
+        )
+        self.add_item(self.value)
+        self.add_item(self.note)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await _requireModPermission(interaction):
             return
 
-        normalizedRuleType = _normalizeRuleType(str(self.ruleType))
-        if not normalizedRuleType:
-            valid = ", ".join(sorted(_flagTypeValues))
+        normalizedRuleType = _normalizeAddableRuleType(self.ruleType)
+        normalizedValue, errorText = _normalizeRuleValue(normalizedRuleType or "", str(self.value))
+        if not normalizedRuleType or errorText or normalizedValue is None:
             await interactionRuntime.safeInteractionReply(
                 interaction,
-                content=f"Invalid rule type. Valid options: {valid}",
+                content=errorText or "Invalid flag proposal.",
                 ephemeral=True,
             )
             return
 
-        rawValue = str(self.value).strip()
-        if normalizedRuleType in _numericRuleTypes:
-            try:
-                parsed = int(rawValue)
-            except ValueError:
-                await interactionRuntime.safeInteractionReply(
-                    interaction,
-                    content="IDs must be numeric for group/item/creator/badge/direct-user/game rules.",
-                    ephemeral=True,
-                )
-                return
-            normalizedValue = str(parsed)
-        else:
-            normalizedValue = rawValue.lower()
-
-        noteText = str(self.note).strip() or None
-        rawSeverity = str(self.severity).strip()
-        severityValue = 0
-        if rawSeverity:
-            try:
-                severityValue = flagService.normalizeSeverity(rawSeverity)
-            except (TypeError, ValueError):
-                severityValue = 0
-            if severityValue <= 0:
-                await interactionRuntime.safeInteractionReply(
-                    interaction,
-                    content="Severity must be a number from 1 to 100, or left blank for Jane's default.",
-                    ephemeral=True,
-                )
-                return
-
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True, thinking=True)
         if normalizedRuleType == "item":
-            await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
             validation = await flagService.validateItemVisualReference(int(normalizedValue))
             validationState = str(validation.get("validationState") or "").strip().upper()
             if validationState != "VALID":
-                errorText = str(validation.get("validationError") or "").strip() or "Item thumbnail validation failed."
+                error = str(validation.get("validationError") or "").strip() or "Item thumbnail validation failed."
                 await interactionRuntime.safeInteractionReply(
                     interaction,
-                    content=f"Jane could not validate item `{normalizedValue}` as a usable visual reference. {errorText}",
+                    content=f"Jane could not validate item `{normalizedValue}` as a usable visual reference. {error}",
                     ephemeral=True,
                 )
                 return
 
-        ruleId = await flagService.addRule(
-            normalizedRuleType,
-            normalizedValue,
-            noteText,
-            interaction.user.id,
-            severityValue,
+        proposalId = await flagService.createProposal(
+            guildId=int(interaction.guild_id or 0),
+            ruleType=normalizedRuleType,
+            ruleValue=normalizedValue,
+            note=str(self.note).strip() or None,
+            proposedBy=int(interaction.user.id),
+            severity=self.severity,
         )
-        severityText = f" with severity {severityValue}" if severityValue > 0 else ""
-        extraText = ""
         if normalizedRuleType == "item":
-            syncResult = await flagService.syncItemVisualReferences(force=False)
-            extraText = f" Visual refs synced: {_formatVisualRefSyncResult(syncResult)}."
+            await flagService.syncItemVisualReferences(force=False)
+        proposal = await flagService.getProposal(proposalId)
+        if not proposal:
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="Jane created the proposal, but could not load it back.",
+                ephemeral=True,
+            )
+            return
+
+        postResult = await _postProposalMessage(interaction.client, proposal)
+        if not bool(postResult.get("ok")):
+            await flagService.deleteProposal(proposalId)
+            if normalizedRuleType == "item":
+                await flagService.syncItemVisualReferences(force=False)
+            await interactionRuntime.safeInteractionReply(
+                interaction,
+                content=str(postResult.get("reason") or "Jane could not post the flag vote."),
+                ephemeral=True,
+            )
+            return
+
         await interactionRuntime.safeInteractionReply(
             interaction,
-            content=f"Added {normalizedRuleType} rule #{ruleId}{severityText}.{extraText}",
+            content=(
+                f"Created rule #{int(proposal.get('resultingRuleId') or 0)} and posted flag vote #{proposalId} "
+                f"in <#{int(postResult.get('channelId') or 0)}>."
+            ),
             ephemeral=True,
         )
 
@@ -524,13 +928,15 @@ class BgFlagPanelView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=600)
 
-    @discord.ui.button(label="Add Rule", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Add Flag", style=discord.ButtonStyle.success, row=0)
     async def addRuleBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await _requireModPermission(interaction):
             return
-        await interactionRuntime.safeInteractionSendModal(
+        await interactionRuntime.safeInteractionReply(
             interaction,
-            BgFlagAddRuleModal(),
+            content="Choose the type and severity for the proposed flag.",
+            view=BgFlagAddRuleSetupView(),
+            ephemeral=True,
         )
 
     @discord.ui.button(label="Remove Rule", style=discord.ButtonStyle.danger, row=0)
@@ -546,6 +952,7 @@ class BgFlagPanelView(discord.ui.View):
     async def listRulesBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await _requireModPermission(interaction):
             return
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
         rules = await flagService.listRules(None)
         if not rules:
             await interactionRuntime.safeInteractionReply(
@@ -587,6 +994,7 @@ class BgFlagPanelView(discord.ui.View):
     async def listQueueFlagsBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await _requireModPermission(interaction):
             return
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True)
         queueRows = await itemReviewService.listQueueEntriesByStatus(
             [itemReviewService.STATUS_FLAGGED],
             guildId=int(interaction.guild_id or 0) or None,
@@ -603,6 +1011,14 @@ class BgFlagCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_load(self) -> None:
+        rows = await flagService.listOpenProposalsWithMessages()
+        for row in rows:
+            messageId = int(row.get("messageId") or 0)
+            proposalId = int(row.get("proposalId") or 0)
+            if messageId > 0 and proposalId > 0:
+                self.bot.add_view(BgFlagProposalVoteView(proposalId), message_id=messageId)
+
     @app_commands.command(name="bg-flag", description="Open the background-check flag manager panel.")
     async def bgFlagPanel(self, interaction: discord.Interaction) -> None:
         if not await _requireModPermission(interaction):
@@ -612,13 +1028,11 @@ class BgFlagCog(commands.Cog):
             title="BG Flag Manager",
             description=(
                 "Use the panel buttons below to manage background-check flags.\n"
-                "Optional severity is a 1-100 minimum score for direct user rules. "
-                "Leave it blank for Jane's default.\n"
-                "Exact `item` rules also feed Jane's visual thumbnail matcher, so new item IDs must resolve to a valid Roblox thumbnail.\n"
-                "Supported rule types:\n"
-                "`group`, `username`, `roblox_user`, `watchlist`, `banned_user`, "
-                "`keyword`, `group_keyword`, `item_keyword`, `game_keyword`, "
-                "`item`, `creator`, `badge`, `game`"
+                "`Add Flag` posts a reviewer vote in the BG item review channel. "
+                "Jane creates the rule immediately and only removes it if not-a-flag votes outnumber flag votes. "
+                f"Votes close after {flagService.PROPOSAL_VOTE_WINDOW_HOURS} hours.\n"
+                "Exact `item` proposals also feed Jane's visual thumbnail matcher while active.\n"
+                "Supported add types: `group`, `keyword`, `item`, `creator`, `badge`, `game`, `game_keyword`."
             ),
             color=discord.Color.blurple(),
         )

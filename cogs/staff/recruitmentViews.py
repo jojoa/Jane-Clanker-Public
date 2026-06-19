@@ -202,12 +202,16 @@ class RecruitmentReviewView(discord.ui.View):
         self,
         *,
         reviewerId: int,
+        requestedBy: str,
+        requestMessageUrl: str,
         change: str,
         details: str,
     ) -> None:
         await recruitmentOutputs.sendRecruitmentSheetChangeLog(
             self.cog.bot,
             reviewerId=reviewerId,
+            requestedBy=requestedBy,
+            requestMessageUrl=requestMessageUrl,
             change=change,
             details=details,
         )
@@ -348,36 +352,40 @@ class RecruitmentReviewView(discord.ui.View):
                     sheetResults: list[dict] = []
                     submission = await self._getSubmission()
                     if submission:
+                        requestMessageUrl = str(getattr(interaction.message, "jump_url", "") or "")
+                        requestedBy = f"<@{int(submission.get('submitterId') or 0)}>"
                         sheetResults = await self._queueApprovalPoints(submission)
                         points = int(submission.get("points") or 0)
                         patrolType = str(submission.get("patrolType") or "solo").strip().lower()
                         if self.submissionType == "recruitment":
                             await self._logRecruitmentSheetChange(
                                 reviewerId=interaction.user.id,
+                                requestedBy=requestedBy,
+                                requestMessageUrl=requestMessageUrl,
                                 change="Edited recruitment points for an approved recruitment log.",
                                 details=(
-                                    f"User: <@{int(submission.get('submitterId') or 0)}> | "
-                                    f"Points +{points}"
+                                    f"Target: <@{int(submission.get('submitterId') or 0)}> | Points: +{points}"
                                 ),
                             )
                         elif patrolType == "group":
                             participantIds = _parseParticipantUserIds(submission.get("participantUserIds"))
                             await self._logRecruitmentSheetChange(
                                 reviewerId=interaction.user.id,
+                                requestedBy=requestedBy,
+                                requestMessageUrl=requestMessageUrl,
                                 change="Edited recruitment patrol events/points for a group patrol approval.",
                                 details=(
-                                    f"Participants: {len(participantIds)} | "
-                                    f"Points per participant +{points} | "
-                                    f"Patrols +1 | Host hosted patrols +1"
+                                    f"Participants: {len(participantIds)} | Points each: +{points} | Patrols: +1 | Host hosted patrols: +1"
                                 ),
                             )
                         else:
                             await self._logRecruitmentSheetChange(
                                 reviewerId=interaction.user.id,
+                                requestedBy=requestedBy,
+                                requestMessageUrl=requestMessageUrl,
                                 change="Edited recruitment patrol events/points for a solo patrol approval.",
                                 details=(
-                                    f"User: <@{int(submission.get('submitterId') or 0)}> | "
-                                    f"Points +{points} | Patrols +1 | Hosted patrols +1"
+                                    f"Target: <@{int(submission.get('submitterId') or 0)}> | Points: +{points} | Patrols: +1 | Hosted patrols: +1"
                                 ),
                             )
 

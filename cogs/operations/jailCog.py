@@ -171,9 +171,7 @@ class JailCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 continue
         return cleared
 
-    @app_commands.command(name="jail", description="Strip a user's roles and place them in jail.")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.guild_only()
+    # Legacy slash handler kept for future reuse.
     async def jail(self, interaction: discord.Interaction, user: discord.Member) -> None:
         member = await self._requireAdministrator(interaction)
         if member is None:
@@ -278,9 +276,7 @@ class JailCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="unjail", description="Restore saved roles for a jailed user and release them.")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.guild_only()
+    # Legacy slash handler kept for future reuse.
     async def unjail(self, interaction: discord.Interaction, user: discord.Member) -> None:
         member = await self._requireAdministrator(interaction)
         if member is None:

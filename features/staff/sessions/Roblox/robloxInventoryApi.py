@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import config
 from features.staff.sessions.Roblox import (
@@ -31,6 +31,8 @@ _appendInventoryVisualCandidate = robloxInventoryMatching.appendInventoryVisualC
 _applyInventoryVisualMatches = robloxInventoryMatching.applyInventoryVisualMatches
 _inventoryMatchEntry = robloxInventoryMatching.inventoryMatchEntry
 
+ProgressCallback = Callable[[str], Awaitable[Any]]
+
 
 def _isSelfCreatedByUser(details: dict, ownerId: int) -> bool:
     creatorId = _extractCreatorId(details)
@@ -46,6 +48,22 @@ def _inventoryHardMaxPages() -> int:
     except (TypeError, ValueError):
         configured = 100
     return max(1, min(configured, 500))
+
+
+async def _emitProgress(progressCallback: ProgressCallback | None, status: str) -> None:
+    if progressCallback is None:
+        return
+    try:
+        await progressCallback(status)
+    except Exception:
+        return
+
+
+def _inventoryProgressStatus(detail: str) -> str:
+    cleanDetail = str(detail or "").strip()
+    if not cleanDetail:
+        return "Reviewing inventory and item values..."
+    return f"Reviewing inventory and item values [{cleanDetail}]..."
 
 
 def _inventoryValueSummary(
@@ -91,7 +109,10 @@ async def _buildPublicInventoryResult(
     targetCreatorIds: Optional[set[int]],
     targetKeywords: Optional[list[str]],
     visualReferenceHashes: Optional[dict[int, str]],
+    visualReferenceColorSignatures: Optional[dict[int, str]],
+    visualReferenceMetadata: Optional[dict[int, dict[str, object]]],
     maxPages: int,
+    progressCallback: ProgressCallback | None = None,
 ) -> RobloxInventoryResult:
     remaining = set(targetItemIds) if targetItemIds else None
     creatorIds = set(targetCreatorIds) if targetCreatorIds else set()
@@ -106,6 +127,7 @@ async def _buildPublicInventoryResult(
         pagesPerType = 0
     if pagesPerType <= 0:
         pagesPerType = max(1, min(int(getattr(config, "bgIntelligencePublicInventoryMaxPagesPerType", 10) or 10), 100))
+    await _emitProgress(progressCallback, _inventoryProgressStatus("scanning public inventory pages"))
     rawRows, status, error, complete = await _fetchPublicInventoryAssets(
         int(robloxUserId),
         maxPagesPerType=pagesPerType,
@@ -132,14 +154,18 @@ async def _buildPublicInventoryResult(
         if entry is not None:
             itemsById[int(entry.get("id") or 0)] = entry
 
+    await _emitProgress(progressCallback, _inventoryProgressStatus("comparing inventory thumbnails"))
     visualSummary = await _applyInventoryVisualMatches(
         flaggedItemsById=itemsById,
         candidateItems=visualCandidates,
         referenceItemIds=set(targetItemIds or set()),
         referenceHashes=visualReferenceHashes,
+        referenceColorSignatures=visualReferenceColorSignatures,
+        referenceMetadata=visualReferenceMetadata,
     )
     items = list(itemsById.values())
 
+    await _emitProgress(progressCallback, _inventoryProgressStatus("pricing owned assets"))
     prices, priceError = await _fetchCatalogAssetPrices(assetIds)
     uniqueAssetCount = len(set(assetIds))
     valueSummary = _inventoryValueSummary(
@@ -163,10 +189,13 @@ async def _buildPublicInventoryResult(
         "priceError": priceError,
         "valueSource": "Roblox public inventory and economy asset details current price",
         "visualCandidateCount": int(visualSummary.get("candidateCount") or 0),
+        "visualComparedCandidateCount": int(visualSummary.get("comparedCandidateCount") or 0),
         "visualReferenceCount": int(visualSummary.get("referenceCount") or 0),
         "visualMatchedCount": int(visualSummary.get("matchedCount") or 0),
         "visualTypeMismatchSkippedCount": int(visualSummary.get("skippedTypeMismatchCount") or 0),
         "visualUnknownTypeSkippedCount": int(visualSummary.get("skippedUnknownTypeCount") or 0),
+        "visualColorMismatchSkippedCount": int(visualSummary.get("skippedColorMismatchCount") or 0),
+        "visualDetailMismatchSkippedCount": int(visualSummary.get("skippedDetailMismatchCount") or 0),
         "visualError": visualSummary.get("error"),
     }
     summary.update(valueSummary)
@@ -180,8 +209,11 @@ async def fetchRobloxInventory(
     targetCreatorIds: Optional[set[int]] = None,
     targetKeywords: Optional[list[str]] = None,
     visualReferenceHashes: Optional[dict[int, str]] = None,
+    visualReferenceColorSignatures: Optional[dict[int, str]] = None,
+    visualReferenceMetadata: Optional[dict[int, dict[str, object]]] = None,
     maxPages: int = 5,
     includeValue: bool = False,
+    progressCallback: ProgressCallback | None = None,
 ) -> RobloxInventoryResult:
     apiKey = getattr(config, "robloxInventoryApiKey", "") or getattr(config, "robloxOpenCloudApiKey", "")
     cacheKey = None
@@ -209,6 +241,24 @@ async def fetchRobloxInventory(
                     if int(assetId or 0) > 0 and str(hashValue).strip()
                 )
             ),
+            tuple(
+                sorted(
+                    (int(assetId), str(colorSignature).strip())
+                    for assetId, colorSignature in dict(visualReferenceColorSignatures or {}).items()
+                    if int(assetId or 0) > 0 and str(colorSignature).strip()
+                )
+            ),
+            tuple(
+                sorted(
+                    (
+                        int(assetId),
+                        int((details or {}).get("assetTypeId") or 0),
+                        str((details or {}).get("visualCategory") or "").strip(),
+                    )
+                    for assetId, details in dict(visualReferenceMetadata or {}).items()
+                    if int(assetId or 0) > 0 and isinstance(details, dict)
+                )
+            ),
             matchVersion,
         )
         cached = _cacheGet(
@@ -227,7 +277,10 @@ async def fetchRobloxInventory(
                 targetCreatorIds=targetCreatorIds,
                 targetKeywords=targetKeywords,
                 visualReferenceHashes=visualReferenceHashes,
+                visualReferenceColorSignatures=visualReferenceColorSignatures,
+                visualReferenceMetadata=visualReferenceMetadata,
                 maxPages=maxPages,
+                progressCallback=progressCallback,
             )
             if cacheKey is not None and not result.error:
                 _cacheSet(
@@ -298,16 +351,20 @@ async def fetchRobloxInventory(
             "priceError": priceError,
             "valueSource": "Roblox economy asset details current price",
             "visualCandidateCount": 0,
+            "visualComparedCandidateCount": 0,
             "visualReferenceCount": 0,
             "visualMatchedCount": 0,
             "visualTypeMismatchSkippedCount": 0,
             "visualUnknownTypeSkippedCount": 0,
+            "visualColorMismatchSkippedCount": 0,
+            "visualDetailMismatchSkippedCount": 0,
             "visualError": None,
         }
         summary.update(_inventoryMatchSummary(list(itemsById.values())))
         return summary
 
     try:
+        await _emitProgress(progressCallback, _inventoryProgressStatus("scanning inventory pages"))
         while True:
             if pageCount >= pageLimit:
                 break
@@ -376,11 +433,14 @@ async def fetchRobloxInventory(
     except Exception as exc:
         return RobloxInventoryResult(list(itemsById.values()), 0, error=str(exc), summary=_summary(status="ERROR"))
 
+    await _emitProgress(progressCallback, _inventoryProgressStatus("comparing inventory thumbnails"))
     visualSummary = await _applyInventoryVisualMatches(
         flaggedItemsById=itemsById,
         candidateItems=visualCandidates,
         referenceItemIds=set(targetItemIds or set()),
         referenceHashes=visualReferenceHashes,
+        referenceColorSignatures=visualReferenceColorSignatures,
+        referenceMetadata=visualReferenceMetadata,
     )
     items = list(itemsById.values())
 
@@ -389,11 +449,15 @@ async def fetchRobloxInventory(
 
     summary = _summary(status="OK")
     summary["visualCandidateCount"] = int(visualSummary.get("candidateCount") or 0)
+    summary["visualComparedCandidateCount"] = int(visualSummary.get("comparedCandidateCount") or 0)
     summary["visualReferenceCount"] = int(visualSummary.get("referenceCount") or 0)
     summary["visualMatchedCount"] = int(visualSummary.get("matchedCount") or 0)
     summary["visualTypeMismatchSkippedCount"] = int(visualSummary.get("skippedTypeMismatchCount") or 0)
     summary["visualUnknownTypeSkippedCount"] = int(visualSummary.get("skippedUnknownTypeCount") or 0)
+    summary["visualColorMismatchSkippedCount"] = int(visualSummary.get("skippedColorMismatchCount") or 0)
+    summary["visualDetailMismatchSkippedCount"] = int(visualSummary.get("skippedDetailMismatchCount") or 0)
     summary["visualError"] = visualSummary.get("error")
+    await _emitProgress(progressCallback, _inventoryProgressStatus("pricing owned assets"))
     prices, priceError = await _fetchCatalogAssetPrices(assetIds)
     if priceError:
         summary["priceError"] = priceError

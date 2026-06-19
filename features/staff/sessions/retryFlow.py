@@ -174,7 +174,7 @@ async def _handleRobloxRetry(interaction: discord.Interaction, sessionId: int) -
 
     statusMessages = {
         "NO_REQUEST": "No pending join request was found. Please request to join the group and try again.",
-        "NO_ROVER": "We couldn't find a RoVer link for your Roblox account. Please verify with RoVer and try again.",
+        "NO_ROVER": "We couldn't find your linked Roblox account. Please run `/verify` and try again.",
         "MISSING_CONFIG": "The bot is missing Roblox configuration. Please contact staff.",
         "NOT_READY": "You're not fully approved yet. Please wait for staff review.",
         "NO_ATTENDEE": "We couldn't find your orientation record. Please contact staff.",
@@ -270,7 +270,7 @@ async def _handleInventoryRetry(
         )
     statusMessages = {
         "PRIVATE": "Inventory is still private or hidden. Please update the privacy setting and try again.",
-        "NO_ROVER": "We could not find your Roblox account via RoVer. Please verify and try again.",
+        "NO_ROVER": "We could not find your linked Roblox account. Please run `/verify` and try again.",
     }
     if status in statusMessages:
         return await _sendEphemeralReply(interaction, statusMessages[status])

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from typing import Any, Awaitable, Callable, Optional
 
 import discord
 from discord import ui
-from features.staff.sessions import bgBuckets
+
+from runtime import permissions as runtimePermissions
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +27,9 @@ _setPendingBgRole: Optional[Callable[..., Awaitable[None]]] = None
 _postOrientationResults: Optional[Callable[..., Awaitable[None]]] = None
 _deleteSessionMessage: Optional[Callable[..., Awaitable[None]]] = None
 _routeBgcSpreadsheet: Optional[Callable[..., Awaitable[Any]]] = None
+_finishingSessionIds: set[int] = set()
+_mentionPattern = re.compile(r"<@!?(\d+)>")
+_attendeeLimitPattern = re.compile(r"attendee\s+limit\s+of\s+(\d+)", re.IGNORECASE)
 
 
 def configure(
@@ -81,6 +87,23 @@ def _isSpreadsheetRoutingResult(result: object) -> bool:
     return all(hasattr(result, attr) for attr in ("url", "expected_channel_ids", "posted_channel_ids", "skipped_reason"))
 
 
+def _claimFinishingSession(sessionId: int) -> bool:
+    normalizedSessionId = _positiveInt(sessionId)
+    if normalizedSessionId <= 0:
+        return False
+    if normalizedSessionId in _finishingSessionIds:
+        return False
+    _finishingSessionIds.add(normalizedSessionId)
+    return True
+
+
+def _releaseFinishingSession(sessionId: int) -> None:
+    normalizedSessionId = _positiveInt(sessionId)
+    if normalizedSessionId <= 0:
+        return
+    _finishingSessionIds.discard(normalizedSessionId)
+
+
 def _spreadsheetRoutingSucceeded(result: object) -> bool:
     if not _isSpreadsheetRoutingResult(result):
         return False
@@ -97,6 +120,163 @@ def _positiveInt(value: object) -> int:
     except (TypeError, ValueError):
         return 0
     return parsed if parsed > 0 else 0
+
+
+def _interactionUserId(interaction: discord.Interaction) -> int:
+    return _positiveInt(getattr(getattr(interaction, "user", None), "id", 0))
+
+
+def _canManageSessionControls(
+    interaction: discord.Interaction,
+    session: dict,
+    *,
+    activeGraderId: int = 0,
+) -> bool:
+    userId = _interactionUserId(interaction)
+    if userId > 0 and userId in {
+        _positiveInt(session.get("hostId")),
+        _positiveInt(activeGraderId),
+    }:
+        return True
+
+    member = getattr(interaction, "user", None)
+    if isinstance(member, discord.Member):
+        return runtimePermissions.hasAdminOrManageGuild(member)
+    return False
+
+
+async def _replyAfterControlError(
+    interaction: discord.Interaction,
+    message: str = "This orientation control hit an internal error. Please try again.",
+) -> None:
+    if _safeInteractionReply is None:
+        return
+    try:
+        await _safeInteractionReply(interaction, message, ephemeral=True)
+    except Exception:
+        log.exception("Failed to send orientation control error reply.")
+
+
+def _sessionControlCustomId(interaction: discord.Interaction) -> str:
+    data = getattr(interaction, "data", None)
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("custom_id") or "").strip()
+
+
+def _firstMentionId(value: object) -> int:
+    match = _mentionPattern.search(str(value or ""))
+    if not match:
+        return 0
+    return _positiveInt(match.group(1))
+
+
+def _gradeFromAttendeeLine(value: object) -> str:
+    lowered = str(value or "").lower()
+    if "passed" in lowered or "white_check_mark" in lowered:
+        return "PASS"
+    if "failed" in lowered or ":x:" in lowered:
+        return "FAIL"
+    return "NOT_GRADED"
+
+
+def _embedFieldValue(embed: object, fieldName: str) -> str:
+    target = str(fieldName or "").strip().casefold()
+    for field in list(getattr(embed, "fields", []) or []):
+        name = str(getattr(field, "name", "") or "").strip().casefold()
+        if name == target:
+            return str(getattr(field, "value", "") or "")
+    return ""
+
+
+def _recoverableOrientationSnapshotFromMessage(
+    interaction: discord.Interaction,
+    sessionId: int,
+) -> Optional[dict[str, Any]]:
+    message = getattr(interaction, "message", None)
+    if message is None:
+        return None
+    embeds = list(getattr(message, "embeds", []) or [])
+    if not embeds:
+        return None
+    embed = embeds[0]
+    title = str(getattr(embed, "title", "") or "").strip().casefold()
+    if "orientation session" not in title:
+        return None
+
+    description = str(getattr(embed, "description", "") or "")
+    limitMatch = _attendeeLimitPattern.search(description)
+    maxAttendeeLimit = _positiveInt(limitMatch.group(1)) if limitMatch else 0
+
+    hostId = _firstMentionId(_embedFieldValue(embed, "Host"))
+    if hostId <= 0:
+        hostId = _interactionUserId(interaction)
+
+    attendeeGrades: list[tuple[int, str]] = []
+    for field in list(getattr(embed, "fields", []) or []):
+        fieldName = str(getattr(field, "name", "") or "").strip().casefold()
+        if not fieldName.startswith("attendees"):
+            continue
+        for line in str(getattr(field, "value", "") or "").splitlines():
+            userId = _firstMentionId(line)
+            if userId > 0:
+                attendeeGrades.append((userId, _gradeFromAttendeeLine(line)))
+
+    footer = getattr(embed, "footer", None)
+    footerText = str(getattr(footer, "text", "") or "")
+    status = "FULL" if len(attendeeGrades) >= max(1, maxAttendeeLimit) else "OPEN"
+    if "status:" in footerText.lower():
+        status = footerText.split(":", 1)[-1].strip().upper() or status
+
+    guild = getattr(interaction, "guild", None)
+    channel = getattr(interaction, "channel", None) or getattr(message, "channel", None)
+    guildId = _positiveInt(getattr(guild, "id", 0) or getattr(interaction, "guild_id", 0))
+    channelId = _positiveInt(getattr(channel, "id", 0))
+    messageId = _positiveInt(getattr(message, "id", 0))
+    if guildId <= 0 or channelId <= 0 or messageId <= 0:
+        return None
+
+    return {
+        "sessionId": int(sessionId),
+        "guildId": guildId,
+        "channelId": channelId,
+        "messageId": messageId,
+        "sessionType": "orientation",
+        "hostId": hostId,
+        "maxAttendeeLimit": max(maxAttendeeLimit, len(attendeeGrades), 1),
+        "status": status,
+        "attendeeGrades": attendeeGrades,
+    }
+
+
+async def _recoverMissingOrientationSessionFromMessage(
+    interaction: discord.Interaction,
+    sessionId: int,
+) -> Optional[dict]:
+    if _service is None or not hasattr(_service, "recoverSessionFromMessageSnapshot"):
+        return None
+    snapshot = _recoverableOrientationSnapshotFromMessage(interaction, sessionId)
+    if not snapshot:
+        return None
+    recovered = await _service.recoverSessionFromMessageSnapshot(**snapshot)
+    if recovered:
+        log.warning(
+            "Recovered missing orientation session %s from Discord message %s with %d attendee(s).",
+            sessionId,
+            snapshot.get("messageId"),
+            len(snapshot.get("attendeeGrades") or []),
+        )
+    return recovered
+
+
+async def _getSessionOrRecoverFromMessage(
+    interaction: discord.Interaction,
+    sessionId: int,
+) -> Optional[dict]:
+    session = await _service.getSession(sessionId)
+    if session:
+        return session
+    return await _recoverMissingOrientationSessionFromMessage(interaction, sessionId)
 
 
 def _spreadsheetRoutingNote(result: object) -> str:
@@ -125,26 +305,20 @@ def _spreadsheetRoutingNote(result: object) -> str:
     return "BGC spreadsheet link posted."
 
 
-async def _bgQueuePostingSummary(sessionId: int) -> tuple[int, int, bool, bool]:
-    session = await _service.getSession(sessionId)
-    attendees = await _service.getAttendees(sessionId)
-    adultCount = 0
-    minorCount = 0
-    for attendee in list(attendees or []):
-        if str(attendee.get("examGrade") or "").upper() != "PASS":
-            continue
-        reviewBucket = bgBuckets.normalizeBgReviewBucket(
-            attendee.get("bgReviewBucket"),
-            default=bgBuckets.adultBgReviewBucket,
-        )
-        if reviewBucket == bgBuckets.minorBgReviewBucket:
-            minorCount += 1
-        else:
-            adultCount += 1
-
-    adultPosted = adultCount <= 0 or int((session or {}).get("bgQueueMessageId") or 0) > 0
-    minorPosted = minorCount <= 0 or int((session or {}).get("bgQueueMinorMessageId") or 0) > 0
-    return adultCount, minorCount, adultPosted, minorPosted
+async def _routeBgcSpreadsheetSafe(bot: discord.Client, sessionId: int, guild: Optional[discord.Guild]) -> None:
+    if guild is None:
+        log.error("Orientation session %s finished, but BGC spreadsheet routing had no guild.", sessionId)
+        return
+    try:
+        result = await _routeBgcSpreadsheet(bot, sessionId, guild)
+        if _isSpreadsheetRoutingResult(result) and not _spreadsheetRoutingSucceeded(result):
+            log.error(
+                "Orientation session %s finished with incomplete BG spreadsheet routing: %s",
+                sessionId,
+                _spreadsheetRoutingNote(result),
+            )
+    except Exception:
+        log.exception("Failed to route BG spreadsheet for orientation session %s.", sessionId)
 
 
 class JoinPasswordModal(ui.Modal, title="Enter Password"):
@@ -229,6 +403,17 @@ class JoinPasswordModal(ui.Modal, title="Enter Password"):
         except Exception:
             log.exception("Failed to refresh session message after attendee clock-in (session=%s).", self.sessionId)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.error(
+            "Orientation join modal failed for session %s.",
+            self.sessionId,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await _replyAfterControlError(
+            interaction,
+            "This orientation could not process your clock-in right now. Please try again.",
+        )
+
 
 class SessionView(ui.View):
     def __init__(self, sessionId: int):
@@ -244,26 +429,42 @@ class SessionView(ui.View):
         session = await _service.getSession(self.sessionId)
         if not session:
             return
-        if session["status"] in ("CANCELED", "FINISHED"):
+        if session["status"] in ("CANCELED", "FINISHED", "FINISHING"):
             for child in self.children:
                 child.disabled = True
-        if session["status"] == "GRADING" or session["status"] == "FULL":
+        if session["status"] in {"GRADING", "FULL", "FINISHING"}:
             self.joinBtn.disabled = True
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: ui.Item[Any],
+    ) -> None:
+        customId = str(getattr(item, "custom_id", "") or "")
+        log.error(
+            "Orientation session control failed (session=%s custom_id=%s).",
+            self.sessionId,
+            customId,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await _replyAfterControlError(interaction)
 
     @ui.button(label="Delete", style=discord.ButtonStyle.danger, row=0)
     async def deleteBtn(self, interaction: discord.Interaction, button: ui.Button):
+        await _safeInteractionDefer(interaction, ephemeral=True)
         sessionId = _parseSessionId(button.custom_id)
-        session = await _service.getSession(sessionId)
+        session = await _getSessionOrRecoverFromMessage(interaction, sessionId)
         if not session:
             return await _safeInteractionReply(
                 interaction,
                 "This orientation session could not be found.",
                 ephemeral=True,
             )
-        if interaction.user.id != session["hostId"]:
+        if not _canManageSessionControls(interaction, session):
             return await _safeInteractionReply(
                 interaction,
-                "Only the session host may Delete the current session.",
+                "Only the session host or a server manager may Delete the current session.",
                 ephemeral=True,
             )
 
@@ -273,18 +474,19 @@ class SessionView(ui.View):
 
     @ui.button(label="Change Grade", style=discord.ButtonStyle.primary, row=0)
     async def gradeBtn(self, interaction: discord.Interaction, button: ui.Button):
+        await _safeInteractionDefer(interaction, ephemeral=True)
         sessionId = _parseSessionId(button.custom_id)
-        session = await _service.getSession(sessionId)
+        session = await _getSessionOrRecoverFromMessage(interaction, sessionId)
         if not session:
             return await _safeInteractionReply(
                 interaction,
                 "This orientation session could not be found.",
                 ephemeral=True,
             )
-        if interaction.user.id != session["hostId"]:
+        if not _canManageSessionControls(interaction, session):
             return await _safeInteractionReply(
                 interaction,
-                "Only the session host may open or use grading controls.",
+                "Only the session host or a server manager may open or use grading controls.",
                 ephemeral=True,
             )
 
@@ -312,80 +514,75 @@ class SessionView(ui.View):
 
     @ui.button(label="Finish", style=discord.ButtonStyle.success, row=0)
     async def finishBtn(self, interaction: discord.Interaction, button: ui.Button):
+        await _safeInteractionDefer(interaction, ephemeral=True)
         sessionId = _parseSessionId(button.custom_id)
-        session = await _service.getSession(sessionId)
+        session = await _getSessionOrRecoverFromMessage(interaction, sessionId)
         if not session:
             return await _safeInteractionReply(
                 interaction,
                 "This orientation session could not be found.",
                 ephemeral=True,
             )
-        if interaction.user.id != session["hostId"]:
+        if not _canManageSessionControls(interaction, session):
             return await _safeInteractionReply(
                 interaction,
-                "Only the session host may Finish the orientation.",
+                "Only the session host or a server manager may Finish the orientation.",
+                ephemeral=True,
+            )
+        status = str(session.get("status") or "").upper()
+        if status == "FINISHING":
+            return await _safeInteractionReply(
+                interaction,
+                "This orientation is already being finished.",
+                ephemeral=True,
+            )
+        if status == "FINISHED":
+            return await _safeInteractionReply(
+                interaction,
+                "This orientation has already been finished.",
+                ephemeral=True,
+            )
+        if status == "CANCELED":
+            return await _safeInteractionReply(
+                interaction,
+                "This orientation has already been canceled.",
+                ephemeral=True,
+            )
+        if not _claimFinishingSession(sessionId):
+            return await _safeInteractionReply(
+                interaction,
+                "This orientation is already being finished.",
                 ephemeral=True,
             )
 
         allowed, reason = await _service.isFinishAllowed(sessionId)
         if not allowed:
+            _releaseFinishingSession(sessionId)
             return await _safeInteractionReply(interaction, reason, ephemeral=True)
 
-        await _safeInteractionDefer(interaction, ephemeral=True)
+        statusLocked = False
+        statusBeforeFinish = status
         try:
             if session.get("sessionType") == "orientation":
-                bgRoutingResult = None
-                try:
-                    bgRoutingResult = await _routeBgcSpreadsheet(interaction.client, sessionId, interaction.guild)
-                except Exception:
-                    log.exception("Failed to route BG spreadsheet/queue for orientation session %s.", sessionId)
-                adultCount, minorCount, adultPosted, minorPosted = await _bgQueuePostingSummary(sessionId)
-                spreadsheetRouting = _isSpreadsheetRoutingResult(bgRoutingResult)
-                if spreadsheetRouting or (adultPosted and minorPosted):
-                    await _postOrientationResults(interaction.client, sessionId)
-                    await _service.finishSession(sessionId)
-                    await _deleteSessionMessage(interaction.client, sessionId)
-                    routingNote = _spreadsheetRoutingNote(bgRoutingResult) if spreadsheetRouting else "BG queues posted for moderation."
-                    if spreadsheetRouting and not _spreadsheetRoutingSucceeded(bgRoutingResult):
-                        log.error(
-                            "Orientation session %s finished with incomplete BG spreadsheet routing: %s",
-                            sessionId,
-                            routingNote,
-                        )
-                    await _safeInteractionReply(
-                        interaction,
-                        (
-                            "Finished. Orientation results posted.\n"
-                            f"+18 routed: `{adultCount}`\n"
-                            f"-18 routed: `{minorCount}`\n"
-                            f"{routingNote}"
-                        ),
-                        ephemeral=True,
-                    )
-                    return
+                await _service.setStatus(sessionId, "FINISHING")
+                statusLocked = True
                 await _updateSessionMessage(interaction.client, sessionId)
-                log.error(
-                    "Orientation session %s finished, but BG queue posting was incomplete (adultPosted=%s minorPosted=%s adultCount=%s minorCount=%s).",
-                    sessionId,
-                    adultPosted,
-                    minorPosted,
-                    adultCount,
-                    minorCount,
-                )
+                await _postOrientationResults(interaction.client, sessionId)
+                await _service.finishSession(sessionId)
+                statusLocked = False
+                await _deleteSessionMessage(interaction.client, sessionId)
+                asyncio.create_task(_routeBgcSpreadsheetSafe(interaction.client, sessionId, interaction.guild))
                 await _safeInteractionReply(
                     interaction,
                     (
-                        "Finished, but Jane could not post all BG queues correctly.\n"
-                        f"+18 routed: `{adultCount}` (`{'ok' if adultPosted else 'missing'}`)\n"
-                        f"-18 routed: `{minorCount}` (`{'ok' if minorPosted else 'missing'}`)\n"
-                        "Check the configured BG review channels."
+                        "Finished. Orientation results posted.\n"
+                        "BGC spreadsheet creation is running in the background and will post the link when ready."
                     ),
                     ephemeral=True,
                 )
                 return
-            else:
-                await _service.finishSession(sessionId)
-                await _updateSessionMessage(interaction.client, sessionId)
+            await _service.finishSession(sessionId)
+            await _updateSessionMessage(interaction.client, sessionId)
             await _safeInteractionReply(
                 interaction,
                 "Finished. BG checks posted for moderation.",
@@ -393,11 +590,19 @@ class SessionView(ui.View):
             )
         except Exception:
             log.exception("Failed to finish orientation session %s", sessionId)
+            if statusLocked:
+                try:
+                    await _service.setStatus(sessionId, statusBeforeFinish)
+                    await _updateSessionMessage(interaction.client, sessionId)
+                except Exception:
+                    log.exception("Failed to restore orientation session %s after finish failure.", sessionId)
             await _safeInteractionReply(
                 interaction,
                 "The session could not be finalized due to an internal error.",
                 ephemeral=True,
             )
+        finally:
+            _releaseFinishingSession(sessionId)
 
     @ui.button(emoji="\u2705", style=discord.ButtonStyle.success, row=1)
     async def joinBtn(self, interaction: discord.Interaction, button: ui.Button):
@@ -408,25 +613,8 @@ class SessionView(ui.View):
                 ephemeral=True,
             )
         sessionId = _parseSessionId(button.custom_id)
-        session = await _service.getSession(sessionId)
-        if not session or session["status"] != "OPEN":
-            return await _safeInteractionReply(
-                interaction,
-                "This orientation is not currently open for clock-ins.",
-                ephemeral=True,
-            )
-        attendeeCount = await _service.getAttendeeCount(sessionId)
-        if session.get("maxAttendeeLimit") <= attendeeCount:
-            return await _safeInteractionReply(
-                interaction,
-                "This orientation has reached its attendee limit, try your luck next time!",
-                ephemeral=True,
-            )
         if not _canClockIn(interaction.user):
             return await _safeInteractionReply(interaction, _clockInDeniedMessage(), ephemeral=True)
-        existing = await _service.getAttendee(sessionId, interaction.user.id)
-        if existing:
-            return await _safeInteractionReply(interaction, "You are already clocked in to this orientation.", ephemeral=True)
         await _safeInteractionSendModal(interaction, JoinPasswordModal(sessionId))
 
 
@@ -439,23 +627,39 @@ class GradingView(ui.View):
         self.passBtn.custom_id = f"grading:pass:{sessionId}"
         self.failBtn.custom_id = f"grading:fail:{sessionId}"
 
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: ui.Item[Any],
+    ) -> None:
+        customId = str(getattr(item, "custom_id", "") or "")
+        log.error(
+            "Orientation grading control failed (session=%s custom_id=%s).",
+            self.sessionId,
+            customId,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await _replyAfterControlError(
+            interaction,
+            "This grading control hit an internal error. Please try again.",
+        )
+
     async def applyGrade(self, interaction: discord.Interaction, grade: str):
-        if interaction.user.id != self.hostId:
-            return await _safeInteractionReply(
-                interaction,
-                "Only the session host may use grading controls.",
-                ephemeral=True,
-            )
         await _safeInteractionDefer(interaction, ephemeral=True)
-
-        self._original_response = await interaction.original_response()
-
         session = await _service.getSession(self.sessionId)
         if not session:
             for child in self.children:
                 child.disabled = True
             await _safeInteractionEditMessage(self, interaction, True, content="Session not found.", view=self)
             return
+        if not _canManageSessionControls(interaction, session, activeGraderId=self.hostId):
+            return await _safeInteractionReply(
+                interaction,
+                "Only the session host or a server manager may use grading controls.",
+                ephemeral=True,
+            )
+
         attendees = await _service.getAttendees(self.sessionId)
         if not attendees:
             for child in self.children:
@@ -501,3 +705,41 @@ class GradingView(ui.View):
     @ui.button(label="Fail", style=discord.ButtonStyle.danger, emoji="\u274C")
     async def failBtn(self, interaction: discord.Interaction, button: ui.Button):
         await self.applyGrade(interaction, "FAIL")
+
+
+async def handleSessionControlFallbackInteraction(interaction: discord.Interaction) -> bool:
+    customId = _sessionControlCustomId(interaction)
+    if not customId.startswith("session:"):
+        return False
+
+    # If the persistent view is attached normally, its callback should acknowledge
+    # immediately. Waiting briefly lets that normal path win while still rescuing
+    # stale/unattached session components before Discord expires the interaction.
+    await asyncio.sleep(1.25)
+    if interaction.response.is_done():
+        return True
+
+    try:
+        sessionId = _parseSessionId(customId)
+    except Exception:
+        await _replyAfterControlError(interaction, "This orientation control is invalid or expired.")
+        return True
+
+    view = SessionView(sessionId)
+    item = next((child for child in view.children if getattr(child, "custom_id", None) == customId), None)
+    if item is None or not hasattr(item, "callback"):
+        await _replyAfterControlError(interaction, "This orientation control is invalid or expired.")
+        return True
+
+    messageId = _positiveInt(getattr(getattr(interaction, "message", None), "id", 0))
+    if messageId > 0:
+        try:
+            interaction.client.add_view(view, message_id=messageId)
+        except Exception:
+            log.exception("Failed to reattach orientation session view for session %s.", sessionId)
+
+    try:
+        await item.callback(interaction)
+    except Exception as exc:
+        await view.on_error(interaction, exc, item)
+    return True

@@ -1,9 +1,7 @@
 ﻿import asyncio
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import discord
@@ -11,47 +9,38 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from db.sqlite import fetchOne, fetchAll, execute
-from features.staff.cohost import recordCohosts, selectCohosts
+from db.sqlite import execute, executeMany, fetchAll, fetchOne
+from features.staff.cohost import CohostHistoryEntry, SelectionResult, VolunteerCandidate, selectCohosts
 from runtime import interaction as interactionRuntime
 from runtime import permissions as runtimePermissions
 
-_repoRoot = Path(__file__).resolve().parents[2]
-_defaultCohostLogPath = _repoRoot / "runtime" / "data" / "cohostLogs.csv"
-_legacyCohostLogPath = _repoRoot / "logs.csv"
-_configuredCohostLogPath = os.getenv("COHOST_LOG_PATH", "").strip()
-if _configuredCohostLogPath:
-    logPath = Path(_configuredCohostLogPath)
-elif _defaultCohostLogPath.exists():
-    logPath = _defaultCohostLogPath
-elif _legacyCohostLogPath.exists():
-    logPath = _legacyCohostLogPath
-else:
-    logPath = _defaultCohostLogPath
-# Keep backwards compatibility with older deployments while preferring the
-# newer runtime/data location.
-logPath.parent.mkdir(parents=True, exist_ok=True)
 log = logging.getLogger(__name__)
-cohostEmoji = os.getenv("COHOST_EMOJI", "\u2705")
-preferSro = os.getenv("COHOST_PREFER_SRO", "true").strip().lower() in {"1", "true", "yes"}
+cohostEmoji = "\u2705"
 finishSelectionTimeoutSec = 30
-supervisorRoleIdRaw = getattr(config, "cohostSupervisorRoleId", 0) or os.getenv("COHOST_SUPERVISOR_ROLE_ID")
+supervisorRoleIdRaw = getattr(config, "cohostSupervisorRoleId", 0)
 try:
     supervisorRoleId = int(supervisorRoleIdRaw) if supervisorRoleIdRaw else 0
 except (TypeError, ValueError):
     supervisorRoleId = 0
 supervisorRoleName = (
     str(getattr(config, "cohostSupervisorRoleName", "") or "").strip()
-    or os.getenv("COHOST_SUPERVISOR_ROLE_NAME", "supervisor eligible")
+    or "supervisor eligible"
 )
 
-rankRoleNames = {
-    "SRO": {"SRO"},
-    "STA": {"STA"},
-    "CRS": {"CRS"},
-    "SU": {"SU"},
+
+def _configuredRoleId(attrName: str, default: int) -> int:
+    try:
+        value = int(getattr(config, attrName, default) or default)
+    except (TypeError, ValueError):
+        value = int(default)
+    return value if value > 0 else int(default)
+
+
+rankRoleIds = {
+    "SRO": _configuredRoleId("cohostSroRoleId", 1373445628054736937),
+    "STA": _configuredRoleId("cohostStaRoleId", 1424201132435177492),
 }
-rankOrder = ["SRO", "STA", "CRS", "SU"]
+rankOrder = ("SRO", "STA")
 
 eventSlots = {
     "solo": getattr(config, "cohostSlotsSolo", 2),
@@ -86,8 +75,9 @@ class CohostRequest:
 
 @dataclass(frozen=True)
 class VolunteerEntry:
-    userId: str
+    userId: int
     rank: str
+    joinedAt: Optional[datetime] = None
 
 
 def _parseDbTime(value: Optional[str]) -> Optional[datetime]:
@@ -103,9 +93,9 @@ def _parseDbTime(value: Optional[str]) -> Optional[datetime]:
 
 
 def _rankFromMember(member: discord.Member) -> Optional[str]:
-    roleNames = {role.name.strip().upper() for role in member.roles}
+    roleIds = {int(role.id) for role in member.roles}
     for rank in rankOrder:
-        if any(name.upper() in roleNames for name in rankRoleNames.get(rank, set())):
+        if rankRoleIds.get(rank, 0) in roleIds:
             return rank
     return None
 
@@ -117,19 +107,6 @@ def _resolveSupervisorMention(guild: discord.Guild) -> str:
         if role.name.strip().lower() == supervisorRoleName.strip().lower():
             return role.mention
     return f"@{supervisorRoleName}"
-
-
-def _cohostAllowedRoleIds() -> set[int]:
-    roleIds = getattr(config, "cohostAllowedRoleIds", None)
-    if not roleIds:
-        return set()
-    normalized: set[int] = set()
-    for value in roleIds:
-        try:
-            normalized.add(int(value))
-        except (TypeError, ValueError):
-            continue
-    return normalized
 
 
 class CohostView(discord.ui.View):
@@ -437,17 +414,82 @@ class CohostCog(commands.Cog):
 
     async def _loadVolunteers(self, messageId: int) -> list[VolunteerEntry]:
         volunteerRows = await fetchAll(
-            "SELECT userId, rank FROM cohost_volunteers WHERE messageId = ? ORDER BY joinTime",
+            "SELECT userId, rank, joinTime FROM cohost_volunteers WHERE messageId = ? ORDER BY joinTime",
             (messageId,),
         )
         volunteers: list[VolunteerEntry] = []
         for row in volunteerRows:
-            userId = str(row.get("userId") or "").strip()
-            if not userId:
+            try:
+                userId = int(row.get("userId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if userId <= 0:
                 continue
             rank = str(row.get("rank") or "").strip().upper()
-            volunteers.append(VolunteerEntry(userId=userId, rank=rank))
+            joinedAt = _parseDbTime(row.get("joinTime"))
+            volunteers.append(VolunteerEntry(userId=userId, rank=rank, joinedAt=joinedAt))
         return volunteers
+
+    async def _loadHistory(self, guildId: int) -> list[CohostHistoryEntry]:
+        rows = await fetchAll(
+            """
+            SELECT userId, eventType, selectedAt
+            FROM cohost_history
+            WHERE guildId = ?
+            """,
+            (guildId,),
+        )
+        history: list[CohostHistoryEntry] = []
+        for row in rows:
+            try:
+                userId = int(row.get("userId") or 0)
+            except (TypeError, ValueError):
+                continue
+            eventType = str(row.get("eventType") or "").strip().lower()
+            if userId <= 0 or not eventType:
+                continue
+            history.append(
+                CohostHistoryEntry(
+                    userId=userId,
+                    eventType=eventType,
+                    selectedAt=_parseDbTime(row.get("selectedAt")),
+                )
+            )
+        return history
+
+    async def _recordSelections(
+        self,
+        request: CohostRequest,
+        selections: list[SelectionResult],
+        selectedAt: datetime,
+    ) -> None:
+        params: list[tuple] = []
+        selectedAtText = selectedAt.isoformat(sep=" ", timespec="seconds")
+        for selection in selections:
+            try:
+                userId = int(selection.userId)
+            except (TypeError, ValueError):
+                continue
+            if userId <= 0:
+                continue
+            params.append(
+                (
+                    int(request.guildId),
+                    int(request.messageId),
+                    request.eventType,
+                    userId,
+                    str(selection.rank or ""),
+                    selectedAtText,
+                )
+            )
+        await executeMany(
+            """
+            INSERT OR IGNORE INTO cohost_history
+                (guildId, requestMessageId, eventType, userId, rank, selectedAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
 
     async def _finalizeRequest(self, messageId: int) -> str:
         lock = self._finalizeLocks.setdefault(messageId, asyncio.Lock())
@@ -471,14 +513,7 @@ class CohostCog(commands.Cog):
                 channel = message.channel if message else None
 
                 volunteers = await self._loadVolunteers(messageId)
-                poolUserIds = [entry.userId for entry in volunteers]
-                poolRanks = {
-                    entry.userId: entry.rank
-                    for entry in volunteers
-                    if entry.rank
-                }
-
-                if not poolUserIds:
+                if not volunteers:
                     await self._setStatus(request, "FINISHED")
                     await self._updateMessage(request, message)
                     await self._safeChannelSend(
@@ -488,15 +523,16 @@ class CohostCog(commands.Cog):
                     return f"No volunteers collected for {request.eventType.title()}."
 
                 asOf = datetime.now()
+                history = await self._loadHistory(request.guildId)
+                candidates = [
+                    VolunteerCandidate(userId=entry.userId, rank=entry.rank, joinedAt=entry.joinedAt)
+                    for entry in volunteers
+                ]
                 selections = await asyncio.to_thread(
                     selectCohosts,
-                    logPath,
                     request.eventType,
-                    poolUserIds=poolUserIds,
-                    poolRanks=poolRanks,
-                    asOf=asOf,
-                    saveFirstAttempts=True,
-                    preferSro=preferSro,
+                    candidates,
+                    history,
                     slots=max(0, int(eventSlots.get(request.eventType, 2))),
                 )
 
@@ -506,16 +542,8 @@ class CohostCog(commands.Cog):
                     await self._safeChannelSend(channel, "No eligible cohost found.")
                     return f"No eligible cohost found for {request.eventType.title()}."
 
-                ranks = {selection.userId: selection.rank for selection in selections if selection.rank}
                 selectedUserIds = [selection.userId for selection in selections]
-                await asyncio.to_thread(
-                    recordCohosts,
-                    logPath,
-                    selectedUserIds,
-                    request.eventType,
-                    date=asOf,
-                    ranks=ranks or None,
-                )
+                await self._recordSelections(request, selections, asOf)
 
                 await self._setStatus(request, "FINISHED")
                 await self._updateMessage(request, message)

@@ -123,6 +123,7 @@ def slashPermissionHint(path: str) -> str:
     voiceChatBasicRoles = runtimePermissions.normalizeRoleIds(getattr(config, "_canCreateVoiceChatBasic", []))
     projectHodRoles = runtimePermissions.normalizeRoleIds(getattr(config, "projectHodRoleIds", []))
     projectAssistantDirectorRoles = runtimePermissions.normalizeRoleIds(getattr(config, "projectAssistantDirectorRoleIds", []))
+    bestOfCommandRoles = runtimePermissions.normalizeRoleIds(getattr(config, "bestOfCommandRoleIds", []))
     allowPublicOrbatLookup = bool(getattr(config, "allowPublicOrbatLookup", False))
 
     applicationPanelRoles = list(appAdminRoles)
@@ -148,7 +149,7 @@ def slashPermissionHint(path: str) -> str:
             f"({runtimePermissions.formatRoleIds(groupPatrolHostRoles)})"
             + (" with recruiter fallback." if groupPatrolHostRoles else ".")
         ),
-        "/bg-check": (
+        "/bg-add": (
             "BG-certified roles required "
             f"({runtimePermissions.formatRoleIds(sorted(runtimePermissions.getBgCheckCertifiedRoleIds()))})."
         ),
@@ -253,7 +254,9 @@ def slashPermissionHint(path: str) -> str:
         "/quarantine": "Administrator/manage-server plus configured recovery allowlist.",
         "/pause": "Configured runtime-control allowlist only.",
         "/restart": "Configured runtime-control allowlist only.",
-        "/best-of": "Administrator only.",
+        "/best-of": (
+            f"Administrator or Best Of command roles ({runtimePermissions.formatRoleIds(bestOfCommandRoles)})."
+        ),
         "/archive": "Administrator only.",
         "/curfew": "Administrator only.",
         "/jail": "Administrator only.",
@@ -411,7 +414,7 @@ def _categorizeSlashPath(path: str) -> str:
         return "sessions"
     if normalized.startswith(("/recruitment", "/recruitment-time-log", "/recruitment-patrol", "/orbat-request", "/loa-request", "/division-clockin")):
         return "recruitment"
-    if normalized.startswith(("/bg-check", "/bg-flag")):
+    if normalized.startswith(("/bg-add", "/bg-flag", "/bg-intel")):
         return "bg"
     if normalized.startswith(("/applications", "/applications-hub-post", "/applications-hub-post-all", "/apps ", "/apps")):
         return "applications"

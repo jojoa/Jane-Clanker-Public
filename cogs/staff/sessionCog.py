@@ -2,6 +2,8 @@
 from discord.ext import commands
 from discord import app_commands
 from features.staff.clockins import ClockinEngine, OrientationClockinAdapter
+from features.staff.sessions import bgAddQueue
+from features.staff.sessions import orientationRoverWarmup
 from features.staff.sessions.views import SessionView, updateSessionMessage
 from runtime import interaction as interactionRuntime
 from runtime import permissions as runtimePermissions
@@ -64,7 +66,10 @@ class SessionsCog(commands.Cog):
             if session is not None
             else discord.Embed(
                 title="Orientation Session",
-                description=f"Click the \u2705 button below to join the session!\n This Orientation has attendee limit of {session.get('maxAttendeeLimit', 30)}.",
+                description=(
+                    "Click the \u2705 button below to join the session!\n"
+                    f" This Orientation has attendee limit of {maxAttendeeLimit}."
+                ),
             )
         )
         try:
@@ -79,36 +84,42 @@ class SessionsCog(commands.Cog):
 
         # Update message with correct view custom_ids
         await updateSessionMessage(self.bot, int(sessionId))
+        orientationRoverWarmup.scheduleOrientationRoverWarmup(self.bot, int(sessionId))
 
         await self._safeEphemeral(interaction, f"Password: ||{password}||")
 
-    @app_commands.command(name="bg-check", description="Create a background-check queue from pending users.")
+    @app_commands.command(name="bg-add", description="Add a Discord user to the next BGC spreadsheet.")
     @app_commands.guild_only()
-    async def bgCheck(self, interaction: discord.Interaction):
-        if not interaction.guild or not interaction.channel:
+    @app_commands.describe(user="Discord user to include in the next BGC spreadsheet.")
+    async def bgAdd(self, interaction: discord.Interaction, user: discord.User):
+        if not interaction.guild:
             return await self._safeEphemeral(interaction, "This command can only be used inside a server channel.")
         if not isinstance(interaction.user, discord.Member):
             return await self._safeEphemeral(interaction, "This command can only be used inside a server channel.")
         if not self.canStartBgCheckQueue(interaction.user):
-            return await self._safeEphemeral(interaction, "You do not have permission to start background-check queues.")
-
-        runtimeServices = getattr(self.bot, "runtimeServices", {}) or {}
-        createBgCheckQueue = runtimeServices.get("createBgCheckQueue")
-        if not callable(createBgCheckQueue):
-            return await self._safeEphemeral(interaction, "Background-check queue creation is unavailable on this build.")
+            return await self._safeEphemeral(interaction, "You do not have permission to add users to the next BGC spreadsheet.")
+        if bool(getattr(user, "bot", False)):
+            return await self._safeEphemeral(interaction, "Bot accounts cannot be added to BGC spreadsheets.")
 
         await interactionRuntime.safeInteractionDefer(
             interaction,
             ephemeral=True,
             thinking=True,
         )
-        ok, response = await createBgCheckQueue(
-            guild=interaction.guild,
-            channel=interaction.channel,
-            actor=interaction.user,
-            sourceMessage=None,
+        result = await bgAddQueue.addPendingUser(
+            guildId=int(interaction.guild.id),
+            userId=int(user.id),
+            addedBy=int(interaction.user.id),
         )
-        await self._safeEphemeral(interaction, response)
+        action = "Added" if bool(result.get("created")) else "Refreshed"
+        await self._safeEphemeral(
+            interaction,
+            (
+                f"{action} {user.mention} for the next orientation BGC spreadsheet.\n"
+                "This does not create a spreadsheet by itself.\n"
+                f"Pending manual additions: `{int(result.get('pendingCount') or 0)}`"
+            ),
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SessionsCog(bot))

@@ -147,6 +147,222 @@ def _badgeAwardLookupDelaySec() -> float:
     return max(0.0, min(configured, 5.0))
 
 
+def _badgeInventoryApiKey() -> str:
+    for attribute in ("robloxInventoryApiKey", "robloxOpenCloudApiKey"):
+        value = str(getattr(config, attribute, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _badgeDetailSampleLimit() -> int:
+    try:
+        configured = int(getattr(config, "bgIntelligenceBadgeHistoryDetailSampleLimit", 25) or 25)
+    except (TypeError, ValueError):
+        configured = 25
+    return max(0, min(configured, 50))
+
+
+def _badgeDetailConcurrency() -> int:
+    try:
+        configured = int(getattr(config, "robloxBadgeDetailLookupConcurrency", 4) or 4)
+    except (TypeError, ValueError):
+        configured = 4
+    return max(1, min(configured, 8))
+
+
+def _openCloudBadgeInventoryRow(row: dict) -> Optional[dict]:
+    badgeIdValue = None
+    badgeDetails = row.get("badgeDetails")
+    if isinstance(badgeDetails, dict):
+        badgeIdValue = badgeDetails.get("badgeId")
+    if badgeIdValue is None:
+        badgeIdValue = row.get("badgeId") or row.get("badge_id") or row.get("id")
+    try:
+        badgeId = int(badgeIdValue) if badgeIdValue is not None else 0
+    except (TypeError, ValueError):
+        badgeId = 0
+    if badgeId <= 0:
+        return None
+
+    badgeRow = {
+        "id": badgeId,
+        "badgeId": badgeId,
+    }
+    addTime = row.get("addTime") or row.get("addedTime")
+    if isinstance(addTime, str) and addTime.strip():
+        badgeRow["awardedDate"] = addTime.strip()
+        badgeRow["awardedDateSource"] = "open_cloud_inventory"
+    return badgeRow
+
+
+async def _fetchRobloxBadgeDetail(badgeId: int) -> Optional[dict]:
+    try:
+        normalizedBadgeId = int(badgeId)
+    except (TypeError, ValueError):
+        return None
+    if normalizedBadgeId <= 0:
+        return None
+
+    cached = _cacheGet(
+        "badge_details",
+        normalizedBadgeId,
+        ttlName="robloxBadgeDetailCacheTtlSec",
+        defaultTtlSec=86400,
+    )
+    if isinstance(cached, dict):
+        return dict(cached)
+
+    url = f"https://badges.roblox.com/v1/badges/{normalizedBadgeId}"
+    status, data = await _requestJson("GET", url, timeoutSec=10)
+    if status != 200 or not isinstance(data, dict):
+        return None
+
+    stats = data.get("statistics") if isinstance(data.get("statistics"), dict) else {}
+    detail = {
+        "name": data.get("displayName") or data.get("name"),
+        "created": data.get("created"),
+        "updated": data.get("updated"),
+        "awardedCount": stats.get("awardedCount"),
+    }
+    _cacheSet(
+        "badge_details",
+        normalizedBadgeId,
+        dict(detail),
+        ttlName="robloxBadgeDetailCacheTtlSec",
+        defaultTtlSec=86400,
+    )
+    return detail
+
+
+async def _populateBadgeHistoryDetails(badges: list[dict]) -> None:
+    sampleLimit = _badgeDetailSampleLimit()
+    if sampleLimit <= 0:
+        return
+
+    targets: list[tuple[dict, int]] = []
+    seenIds: set[int] = set()
+    for badge in badges:
+        if len(targets) >= sampleLimit:
+            break
+        if not isinstance(badge, dict):
+            continue
+        badgeId = _extractBadgeId(badge)
+        if badgeId is None or badgeId in seenIds:
+            continue
+        if badge.get("name") and badge.get("created") and badge.get("updated"):
+            continue
+        seenIds.add(badgeId)
+        targets.append((badge, badgeId))
+    if not targets:
+        return
+
+    semaphore = asyncio.Semaphore(_badgeDetailConcurrency())
+
+    async def _loadDetail(badgeId: int) -> Optional[dict]:
+        async with semaphore:
+            return await _fetchRobloxBadgeDetail(badgeId)
+
+    details = await asyncio.gather(
+        *[_loadDetail(badgeId) for _, badgeId in targets],
+        return_exceptions=True,
+    )
+    for (badge, _), detail in zip(targets, details):
+        if isinstance(detail, Exception) or not isinstance(detail, dict):
+            continue
+        for key in ("name", "created", "updated", "awardedCount"):
+            value = detail.get(key)
+            if value is not None and not badge.get(key):
+                badge[key] = value
+
+
+async def _fetchRobloxUserBadgesOpenCloud(
+    normalizedUserId: int,
+    *,
+    pageLimit: int,
+    pageCountLimit: int,
+) -> RobloxUserBadgesResult:
+    apiKey = _badgeInventoryApiKey()
+    if not apiKey:
+        return RobloxUserBadgesResult([], 0, error="Missing Roblox Open Cloud API key for badge history.")
+
+    cacheKey = ("v3-opencloud", normalizedUserId, pageLimit, pageCountLimit)
+    cached = _cacheGet(
+        "user_badges",
+        cacheKey,
+        ttlName="robloxBadgeHistoryCacheTtlSec",
+        defaultTtlSec=86400,
+    )
+    if isinstance(cached, RobloxUserBadgesResult):
+        return cached
+
+    url = f"https://apis.roblox.com/cloud/v2/users/{normalizedUserId}/inventory-items"
+    headers = {"x-api-key": apiKey}
+    params = {
+        "maxPageSize": str(pageLimit),
+        "filter": "badges=true;gamePasses=false",
+    }
+    cursor: Optional[str] = None
+    badges: list[dict] = []
+    status = 200
+
+    try:
+        for _ in range(pageCountLimit):
+            if cursor:
+                params["pageToken"] = cursor
+            else:
+                params.pop("pageToken", None)
+            status, data = await _requestJson("GET", url, headers=headers, params=params, timeoutSec=10)
+            if status != 200 or not isinstance(data, dict):
+                detail = ""
+                if isinstance(data, dict):
+                    detail = str(data.get("message") or data.get("error") or "").strip()
+                    if not detail and isinstance(data.get("errors"), list) and data["errors"]:
+                        first = data["errors"][0]
+                        if isinstance(first, dict):
+                            detail = str(first.get("message") or first.get("error") or "").strip()
+                        elif isinstance(first, str):
+                            detail = first.strip()
+                suffix = f": {detail}" if detail else ""
+                return RobloxUserBadgesResult(
+                    badges,
+                    status,
+                    nextCursor=cursor,
+                    error=f"Badge history lookup failed ({status}){suffix}.",
+                )
+            rawItems = data.get("inventoryItems") or data.get("items")
+            if not isinstance(rawItems, list):
+                return RobloxUserBadgesResult(
+                    badges,
+                    status,
+                    nextCursor=cursor,
+                    error="Badge history lookup returned invalid data.",
+                )
+            for rawItem in rawItems:
+                if not isinstance(rawItem, dict):
+                    continue
+                badgeRow = _openCloudBadgeInventoryRow(rawItem)
+                if badgeRow is not None:
+                    badges.append(badgeRow)
+            cursor = data.get("nextPageToken")
+            if not cursor:
+                break
+    except Exception as exc:
+        return RobloxUserBadgesResult(badges, 0, nextCursor=cursor, error=str(exc))
+
+    badges.sort(key=lambda badge: str(badge.get("awardedDate") or ""), reverse=True)
+    await _populateBadgeHistoryDetails(badges)
+    result = RobloxUserBadgesResult(badges, status, nextCursor=cursor)
+    _cacheSet(
+        "user_badges",
+        cacheKey,
+        result,
+        ttlName="robloxBadgeHistoryCacheTtlSec",
+        defaultTtlSec=86400,
+    )
+    return result
+
+
 _PUBLIC_INVENTORY_ASSET_TYPE_IDS: tuple[int, ...] = (
     1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 17, 18, 19, 24,
     27, 28, 29, 30, 31, 32, 38, 40, 41, 42, 43, 44, 45,
@@ -286,6 +502,16 @@ async def fetchRobloxUserBadges(
         pageCountLimit = _badgeHistoryHardMaxPages()
     else:
         pageCountLimit = max(1, min(normalizedMaxPages, _badgeHistoryHardMaxPages()))
+
+    if _badgeInventoryApiKey():
+        openCloudResult = await _fetchRobloxUserBadgesOpenCloud(
+            normalizedUserId,
+            pageLimit=pageLimit,
+            pageCountLimit=pageCountLimit,
+        )
+        if not openCloudResult.error or openCloudResult.badges:
+            return openCloudResult
+
     cacheKey = ("v2", normalizedUserId, pageLimit, pageCountLimit)
     cached = _cacheGet(
         "user_badges",

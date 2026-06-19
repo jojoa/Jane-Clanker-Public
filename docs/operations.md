@@ -11,7 +11,7 @@ This is the short practical doc for running Jane without remembering every opera
 - `/pause`
   Pause or unpause the bot
 - `/restart`
-  Restart Jane, with optional Git update behavior depending on config/env
+  Restart Jane, checking GitHub for safe updates first unless disabled
 
 ## Logs
 
@@ -61,8 +61,8 @@ Check:
 
 Check:
 
-- `JANE_ALLOW_GIT_PULL_ON_RESTART`
 - `JANE_ENABLE_AUTO_GIT_UPDATE`
+- `JANE_DISABLE_GIT_PULL_ON_RESTART`
 - whether the host is supervisor-managed
 
 ### If a feature works locally but not on the server

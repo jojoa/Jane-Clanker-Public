@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Awaitable, Callable, Optional
 
 import discord
@@ -8,8 +10,9 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+from features.staff.bgItemReview import workflow as itemReviewWorkflow
 from features.staff.bgIntelligence import rendering, scoring, service
-from features.staff.sessions.Roblox import robloxUsers
+from features.staff.sessions import bgSpreadsheetQueue
 from runtime import interaction as interactionRuntime
 from runtime import permissions as runtimePermissions
 
@@ -18,7 +21,7 @@ log = logging.getLogger(__name__)
 ProgressUpdater = Callable[[str], Awaitable[bool]]
 
 
-BG_INTEL_SECTIONS: tuple[tuple[str, str], ...] = (
+BG_INTEL_BASE_SECTIONS: tuple[tuple[str, str], ...] = (
     ("overview", "Overview"),
     ("scan", "Detection Summary"),
     ("sources", "Source Checks"),
@@ -33,10 +36,164 @@ BG_INTEL_SECTIONS: tuple[tuple[str, str], ...] = (
     ("external", "Safety Records"),
     ("history", "Jane History"),
 )
+BG_INTEL_DEBUG_SECTION = ("debug", "Debug Timings")
+
+
+def _bgIntelSections(*, includeDebug: bool = False) -> tuple[tuple[str, str], ...]:
+    if not includeDebug:
+        return BG_INTEL_BASE_SECTIONS
+    return BG_INTEL_BASE_SECTIONS + (BG_INTEL_DEBUG_SECTION,)
+
+
+def _bgIntelProgressMinIntervalSec() -> float:
+    try:
+        configured = float(getattr(config, "bgIntelligenceProgressUiMinIntervalSec", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        configured = 1.0
+    return max(0.0, min(configured, 10.0))
+
+
+def _bgIntelProgressShouldForceUi(status: str) -> bool:
+    cleanStatus = str(status or "").strip()
+    if not cleanStatus:
+        return False
+    forcePrefixes = (
+        "Checking Discord membership and main-server lookup...",
+        "No Roblox account found; checking external safety records only...",
+        "Reviewing inventory and item values",
+        "Collecting the full badge timeline...",
+        "Checking configured badge records...",
+        "Correlating known-member alt evidence...",
+        "Saving the audit record...",
+        "Saving the rerun audit record...",
+        "Rendering the overview...",
+        "Posting the overview...",
+    )
+    return cleanStatus.startswith(forcePrefixes)
+
+
+def _bgIntelReportChannelId() -> int:
+    try:
+        return int(getattr(config, "bgIntelligenceReportChannelId", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _resolveBgIntelReportChannel(
+    client: discord.Client,
+    *,
+    fallbackChannel: object = None,
+) -> object:
+    channelId = _bgIntelReportChannelId()
+    if channelId > 0:
+        channel = client.get_channel(channelId)
+        if channel is None:
+            try:
+                channel = await client.fetch_channel(channelId)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = None
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return channel
+    return fallbackChannel
+
+
+async def _updateBgIntelSheetLinkSafe(
+    *,
+    report: object,
+    riskScore: scoring.RiskScore,
+    reportId: int,
+    message: discord.Message | None,
+    guildId: int,
+) -> bgSpreadsheetQueue.BgIntelSheetUpdateResult:
+    messageUrl = str(getattr(message, "jump_url", "") or "").strip()
+    try:
+        return await bgSpreadsheetQueue.updateLatestBgIntelSheetLink(
+            report=report,
+            riskScore=riskScore,
+            reportId=int(reportId or 0),
+            messageUrl=messageUrl,
+            guildId=int(guildId or 0),
+        )
+    except Exception:
+        log.exception("BG intelligence sheet update failed.")
+        return bgSpreadsheetQueue.BgIntelSheetUpdateResult(reason="Sheet update failed internally.")
+
+
+@dataclass
+class BgIntelDebugTracker:
+    enabled: bool = False
+    startedAt: float = field(default_factory=perf_counter)
+    currentStep: str | None = None
+    currentStartedAt: float | None = None
+    steps: list[dict[str, object]] = field(default_factory=list)
+    progressUiSeconds: float = 0.0
+
+    def _appendStep(self, label: str, seconds: float) -> None:
+        if not self.enabled:
+            return
+        self.steps.append(
+            {
+                "label": str(label or "Working...").strip() or "Working...",
+                "seconds": round(max(0.0, float(seconds or 0.0)), 3),
+            }
+        )
+
+    def _closeCurrentStep(self) -> None:
+        if not self.enabled or not self.currentStep or self.currentStartedAt is None:
+            return
+        self._appendStep(self.currentStep, perf_counter() - self.currentStartedAt)
+        self.currentStep = None
+        self.currentStartedAt = None
+
+    def record(self, label: str, seconds: float) -> None:
+        self._appendStep(label, seconds)
+
+    async def update(self, updater: ProgressUpdater, status: str) -> bool:
+        if not self.enabled:
+            return await updater(status)
+        self._closeCurrentStep()
+        progressStartedAt = perf_counter()
+        sent = await updater(status)
+        self.progressUiSeconds += max(0.0, perf_counter() - progressStartedAt)
+        self.currentStep = str(status or "Working...").strip() or "Working..."
+        self.currentStartedAt = perf_counter()
+        return sent
+
+    def finish(self) -> dict[str, object] | None:
+        if not self.enabled:
+            return None
+        self._closeCurrentStep()
+        totalSeconds = max(0.0, perf_counter() - self.startedAt)
+        summary = {
+            "totalSeconds": round(totalSeconds, 3),
+            "steps": list(self.steps),
+        }
+        if self.progressUiSeconds > 0:
+            summary["uiSeconds"] = round(self.progressUiSeconds, 3)
+        return summary
+
+
+@dataclass
+class BgIntelProgressRelay:
+    updater: ProgressUpdater
+    minIntervalSec: float = field(default_factory=_bgIntelProgressMinIntervalSec)
+    lastSentAt: float | None = None
+    nowFactory: Callable[[], float] = perf_counter
+
+    async def update(self, status: str) -> bool:
+        cleanStatus = str(status or "Working...").strip() or "Working..."
+        now = self.nowFactory()
+        shouldForce = _bgIntelProgressShouldForceUi(cleanStatus)
+        if not shouldForce and self.lastSentAt is not None and (now - self.lastSentAt) < self.minIntervalSec:
+            return False
+        sent = await self.updater(cleanStatus)
+        if sent:
+            self.lastSentAt = self.nowFactory()
+        return sent
 
 
 class BgIntelSectionSelect(discord.ui.Select):
-    def __init__(self, selectedSection: str = "overview") -> None:
+    def __init__(self, selectedSection: str = "overview", *, includeDebug: bool = False) -> None:
         super().__init__(
             placeholder="Expand a BG intelligence section",
             min_values=1,
@@ -44,7 +201,7 @@ class BgIntelSectionSelect(discord.ui.Select):
             row=0,
             options=[
                 discord.SelectOption(label=label, value=section, default=section == selectedSection)
-                for section, label in BG_INTEL_SECTIONS
+                for section, label in _bgIntelSections(includeDebug=includeDebug)
             ],
         )
 
@@ -69,6 +226,89 @@ class BgIntelDmInventoryButton(discord.ui.Button):
         view = self.view
         if isinstance(view, BgIntelDetailsView):
             await view.sendInventoryNotice(interaction)
+
+
+class BgIntelDisputeFlagButton(discord.ui.Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="Dispute Flag",
+            style=discord.ButtonStyle.danger,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if isinstance(view, BgIntelDetailsView):
+            await view.requestDisputeFlag(interaction)
+
+
+class BgIntelDisputeSelect(discord.ui.Select):
+    def __init__(self, detailsView: "BgIntelDetailsView", items: list[dict[str, object]]) -> None:
+        options: list[discord.SelectOption] = []
+        for index, item in enumerate(list(items or [])[:25]):
+            itemId = int(item.get("id") or 0)
+            itemName = str(item.get("name") or f"Asset {itemId}").strip() or f"Asset {itemId}"
+            reason = str(item.get("matchType") or "flagged").replace("_", " ").strip() or "flagged"
+            options.append(
+                discord.SelectOption(
+                    label=itemName[:100],
+                    value=str(index),
+                    description=f"{reason[:50]} | asset {itemId}"[:100],
+                )
+            )
+        super().__init__(
+            placeholder="Choose a flagged item to dispute",
+            min_values=1,
+            max_values=1,
+            row=0,
+            options=options,
+        )
+        self.detailsView = detailsView
+        self.items = list(items or [])[:25]
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        try:
+            selectedIndex = int(self.values[0] if self.values else "0")
+        except (TypeError, ValueError):
+            selectedIndex = -1
+        if selectedIndex < 0 or selectedIndex >= len(self.items):
+            return await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="That flagged item could not be resolved.",
+                ephemeral=True,
+            )
+        await self.detailsView.disputeFlag(interaction, self.items[selectedIndex])
+
+
+class BgIntelDisputeSelectView(discord.ui.View):
+    def __init__(self, detailsView: "BgIntelDetailsView", items: list[dict[str, object]]) -> None:
+        super().__init__(timeout=120)
+        self.ownerId = int(detailsView.ownerId)
+        self.add_item(BgIntelDisputeSelect(detailsView, items))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) == int(self.ownerId):
+            return True
+        await interactionRuntime.safeInteractionReply(
+            interaction,
+            content="This BG intelligence panel belongs to the reviewer who ran the scan.",
+            ephemeral=True,
+        )
+        return False
+
+
+class BgIntelReportButton(discord.ui.Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="Full Text Report",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if isinstance(view, BgIntelDetailsView):
+            await view.sendTextReport(interaction)
 
 
 class BgIntelRerunButton(discord.ui.Button):
@@ -136,6 +376,7 @@ class BgIntelDetailsView(discord.ui.View):
         riskScore: scoring.RiskScore,
         reportId: int,
         includeTextReport: bool = False,
+        debugMode: bool = False,
         roverGuildId: int | None = None,
         robloxUsernameOverride: str | None = None,
         notifyPrivateInventory: bool = False,
@@ -145,12 +386,16 @@ class BgIntelDetailsView(discord.ui.View):
         self.report = report
         self.riskScore = riskScore
         self.reportId = int(reportId or 0)
-        self.includeTextReport = bool(includeTextReport)
+        self.debugMode = bool(debugMode)
+        self.includeTextReport = bool(includeTextReport or self.debugMode)
         self.roverGuildId = int(roverGuildId or 0) or None
         self.robloxUsernameOverride = str(robloxUsernameOverride or "").strip() or None
         self.notifyPrivateInventory = bool(notifyPrivateInventory)
         self.currentSection = "overview"
         self._rebuildControls("overview")
+
+    def _availableSections(self) -> tuple[tuple[str, str], ...]:
+        return _bgIntelSections(includeDebug=self.debugMode)
 
     def _robloxProfileUrl(self) -> str | None:
         try:
@@ -161,7 +406,25 @@ class BgIntelDetailsView(discord.ui.View):
             return None
         return f"https://www.roblox.com/users/{robloxUserId}/profile"
 
-    def _addActionButtons(self) -> None:
+    def _flaggedInventoryItems(self) -> list[dict[str, object]]:
+        items: list[dict[str, object]] = []
+        for raw in list(getattr(self.report, "flaggedItems", None) or []):
+            if not isinstance(raw, dict):
+                continue
+            try:
+                assetId = int(raw.get("id") or 0)
+            except (TypeError, ValueError):
+                assetId = 0
+            if assetId <= 0:
+                continue
+            items.append(dict(raw))
+        return items
+
+    def _shouldShowDisputeButton(self, section: str) -> bool:
+        normalizedSection = str(section or "overview").strip().lower()
+        return normalizedSection == "inventory" and bool(self._flaggedInventoryItems())
+
+    def _addActionButtons(self, section: str) -> None:
         profileUrl = self._robloxProfileUrl()
         if profileUrl:
             self.add_item(
@@ -173,15 +436,19 @@ class BgIntelDetailsView(discord.ui.View):
                 )
             )
         self.add_item(BgIntelSummaryButton())
+        self.add_item(BgIntelReportButton())
         self.add_item(BgIntelRerunButton())
         inventoryPrivate = str(getattr(self.report, "inventoryScanStatus", "") or "").strip().upper() == "PRIVATE"
         hasDiscordTarget = int(getattr(self.report, "discordUserId", 0) or 0) > 0
         self.add_item(BgIntelDmInventoryButton(enabled=inventoryPrivate and hasDiscordTarget))
+        if self._shouldShowDisputeButton(section):
+            self.add_item(BgIntelDisputeFlagButton())
 
     def _rebuildControls(self, section: str) -> None:
         self.clear_items()
-        self.add_item(BgIntelSectionSelect(section))
-        self._addActionButtons()
+        includeDebug = any(item[0] == "debug" for item in self._availableSections())
+        self.add_item(BgIntelSectionSelect(section, includeDebug=includeDebug))
+        self._addActionButtons(section)
         self._syncSelectedSection(section)
 
     def _badgeGraphFilename(self) -> str:
@@ -242,7 +509,7 @@ class BgIntelDetailsView(discord.ui.View):
 
     def _syncSelectedSection(self, section: str) -> None:
         normalizedSection = str(section or "overview").strip().lower()
-        validSections = {item[0] for item in BG_INTEL_SECTIONS}
+        validSections = {item[0] for item in self._availableSections()}
         if normalizedSection not in validSections:
             normalizedSection = "overview"
         self.currentSection = normalizedSection
@@ -312,6 +579,21 @@ class BgIntelDetailsView(discord.ui.View):
             allowedMentions=discord.AllowedMentions.none(),
         )
 
+    async def sendTextReport(self, interaction: discord.Interaction) -> None:
+        reportFile = rendering.buildReportTextFile(
+            self.report,
+            score=self.riskScore,
+            reportId=self.reportId if self.reportId > 0 else None,
+            filename=self._reportTextFilename(),
+        )
+        await interactionRuntime.safeInteractionReply(
+            interaction,
+            content="Attached full BG intelligence text report.",
+            file=reportFile,
+            ephemeral=True,
+            allowedMentions=discord.AllowedMentions.none(),
+        )
+
     async def sendInventoryNotice(self, interaction: discord.Interaction) -> None:
         await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True, thinking=True)
         discordUserId = int(getattr(self.report, "discordUserId", 0) or 0)
@@ -325,6 +607,7 @@ class BgIntelDetailsView(discord.ui.View):
         self.report.privateInventoryDmSent = bool(sent)
         messageObject = getattr(interaction, "message", None)
         if messageObject is not None:
+            self._rebuildControls(self.currentSection)
             embed, attachments = self._buildPublicPayload(self.currentSection)
             await interactionRuntime.safeMessageEdit(
                 messageObject,
@@ -360,7 +643,7 @@ class BgIntelDetailsView(discord.ui.View):
             except (discord.NotFound, discord.HTTPException, AttributeError):
                 return await interactionRuntime.safeInteractionReply(
                     interaction,
-                    content="I couldn't open the Roblox username prompt. Run `/bg-intel` again with the Discord ID and Roblox username.",
+                    content="I couldn't open the Roblox username prompt. Run `/bg-intel` again with the member field and Roblox username.",
                     ephemeral=True,
                 )
         await self.rerunScan(interaction)
@@ -386,7 +669,7 @@ class BgIntelDetailsView(discord.ui.View):
             )
         await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True, thinking=True)
 
-        async def progress(status: str) -> bool:
+        async def rawProgress(status: str) -> bool:
             cleanStatus = str(status or "Running scan...").strip() or "Running scan..."
             try:
                 await interaction.edit_original_response(
@@ -398,6 +681,12 @@ class BgIntelDetailsView(discord.ui.View):
                 return True
             except (discord.NotFound, discord.HTTPException, AttributeError, TypeError):
                 return False
+
+        debugTracker = BgIntelDebugTracker(enabled=self.debugMode)
+        progressRelay = BgIntelProgressRelay(rawProgress)
+
+        async def progress(status: str) -> bool:
+            return await debugTracker.update(progressRelay.update, status)
 
         try:
             await progress("Preparing rerun...")
@@ -416,6 +705,7 @@ class BgIntelDetailsView(discord.ui.View):
                     reviewer=interaction.user,
                     configModule=config,
                     progressCallback=progress,
+                    debugTimingRecorder=debugTracker.record,
                 )
             elif discordUserId > 0:
                 report = await service.buildReportForDiscordId(
@@ -427,6 +717,7 @@ class BgIntelDetailsView(discord.ui.View):
                     reviewBucketOverride="adult",
                     configModule=config,
                     progressCallback=progress,
+                    debugTimingRecorder=debugTracker.record,
                 )
             else:
                 report = await service.buildReportForRobloxIdentity(
@@ -436,9 +727,11 @@ class BgIntelDetailsView(discord.ui.View):
                     reviewBucketOverride="adult",
                     configModule=config,
                     progressCallback=progress,
+                    debugTimingRecorder=debugTracker.record,
                 )
-            await progress("Scoring and saving rerun...")
+            await progress("Scoring the rerun...")
             riskScore = scoring.scoreReport(report, configModule=config)
+            await progress("Saving the rerun audit record...")
             channelId = int(getattr(getattr(interaction, "channel", None), "id", 0) or 0)
             reportId = await service.recordReport(
                 guildId=int(interaction.guild.id),
@@ -447,6 +740,7 @@ class BgIntelDetailsView(discord.ui.View):
                 report=report,
                 riskScore=riskScore,
             )
+            await progress("Rendering the refreshed overview...")
         except Exception:
             log.exception("BG intelligence rerun failed.")
             return await self._finishEphemeral(
@@ -461,6 +755,7 @@ class BgIntelDetailsView(discord.ui.View):
             self.robloxUsernameOverride = cleanRobloxUsernameOverride
         self._rebuildControls("overview")
         embed, attachments = self._buildPublicPayload("overview")
+        await progress("Updating the live panel...")
         message = getattr(interaction, "message", None)
         if message is not None:
             await interactionRuntime.safeMessageEdit(
@@ -469,11 +764,85 @@ class BgIntelDetailsView(discord.ui.View):
                 view=self,
                 attachments=attachments,
             )
-        await self._finishEphemeral(interaction, "Rerun complete. The BG intelligence panel was refreshed.")
+            timingSummary = debugTracker.finish()
+            if timingSummary is not None:
+                setattr(self.report, "debugTimingSummary", timingSummary)
+                finalEmbed, finalAttachments = self._buildPublicPayload("overview")
+                await interactionRuntime.safeMessageEdit(
+                    message,
+                    embed=finalEmbed,
+                    view=self,
+                    attachments=finalAttachments,
+                )
+        else:
+            timingSummary = debugTracker.finish()
+            if timingSummary is not None:
+                setattr(self.report, "debugTimingSummary", timingSummary)
+        await progress("Updating the BGC spreadsheet link...")
+        sheetUpdate = await _updateBgIntelSheetLinkSafe(
+            report=self.report,
+            riskScore=self.riskScore,
+            reportId=self.reportId,
+            message=message if isinstance(message, discord.Message) else None,
+            guildId=int(interaction.guild.id),
+        )
+        finalMessage = "Rerun complete. The BG intelligence panel was refreshed."
+        if sheetUpdate.updated:
+            finalMessage += (
+                f"\nUpdated `Jane Intel` on `{sheetUpdate.spreadsheet_title or 'BGC spreadsheet'}` "
+                f"row `{sheetUpdate.row_number}`."
+            )
+        elif sheetUpdate.reason:
+            finalMessage += f"\nSheet link not updated: {sheetUpdate.reason}"
+        await self._finishEphemeral(interaction, finalMessage)
+
+    async def requestDisputeFlag(self, interaction: discord.Interaction) -> None:
+        flaggedItems = self._flaggedInventoryItems()
+        if not flaggedItems:
+            return await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="There are no flagged inventory items to dispute on this report.",
+                ephemeral=True,
+            )
+        if len(flaggedItems) == 1:
+            return await self.disputeFlag(interaction, flaggedItems[0])
+        await interactionRuntime.safeInteractionReply(
+            interaction,
+            content="Choose the flagged item to re-post for manual review.",
+            view=BgIntelDisputeSelectView(self, flaggedItems),
+            ephemeral=True,
+            allowedMentions=discord.AllowedMentions.none(),
+        )
+
+    async def disputeFlag(self, interaction: discord.Interaction, flaggedItem: dict[str, object]) -> None:
+        if interaction.guild is None:
+            return await interactionRuntime.safeInteractionReply(
+                interaction,
+                content="This dispute flow can only run inside a server.",
+                ephemeral=True,
+            )
+        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True, thinking=True)
+        result = await itemReviewWorkflow.queueBgIntelDisputedItem(
+            interaction.client,
+            guildId=int(interaction.guild.id),
+            reviewerId=int(interaction.user.id),
+            report=self.report,
+            flaggedItem=flaggedItem,
+            reportId=self.reportId,
+        )
+        if not bool(result.get("ok")):
+            reason = str(result.get("reason") or "").strip() or "I couldn't queue that item for manual review."
+            return await self._finishEphemeral(interaction, reason)
+        queueId = int(result.get("queueId") or 0)
+        if bool(result.get("created")):
+            message = f"Queued flagged item for manual review as queue #{queueId}."
+        else:
+            message = f"Re-posted flagged item for manual review on queue #{queueId}."
+        await self._finishEphemeral(interaction, message)
 
     async def showSection(self, interaction: discord.Interaction, section: str) -> None:
         normalizedSection = str(section or "overview").strip().lower()
-        self._syncSelectedSection(normalizedSection)
+        self._rebuildControls(normalizedSection)
         embed, attachments = self._buildPublicPayload(normalizedSection)
         try:
             await interaction.response.edit_message(embed=embed, view=self, attachments=attachments)
@@ -553,10 +922,14 @@ class BgIntelligenceCog(commands.Cog):
         embed: discord.Embed,
         view: BgIntelDetailsView,
         files: list[discord.File] | None = None,
-    ) -> None:
-        channel = getattr(interaction, "channel", None)
+    ) -> discord.Message | None:
+        fallbackChannel = getattr(interaction, "channel", None)
+        channel = await _resolveBgIntelReportChannel(
+            interaction.client,
+            fallbackChannel=fallbackChannel,
+        )
         sentMessage = None
-        if channel is not None:
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
             payload = {
                 "embed": embed,
                 "view": view,
@@ -568,14 +941,15 @@ class BgIntelligenceCog(commands.Cog):
         if sentMessage is not None:
             await self._finishBgIntelStatus(
                 interaction,
-                "Background-check overview posted.",
+                f"Background-check overview posted in <#{int(sentMessage.channel.id)}>.",
             )
-            return
+            return sentMessage
 
         await self._finishBgIntelStatus(
             interaction,
             "I couldn't post the background-check overview in this channel.",
         )
+        return None
 
     async def _safeEphemeral(self, interaction: discord.Interaction, message: str) -> None:
         await interactionRuntime.safeInteractionReply(
@@ -656,164 +1030,37 @@ class BgIntelligenceCog(commands.Cog):
                 return None
         return await self._fetchGuildMemberById(mainGuild, int(discordUserId))
 
-    async def _resolveAltLinkEndpoint(
-        self,
-        *,
-        guild: discord.Guild,
-        member: discord.Member | None,
-        discordId: str | None,
-        robloxUsername: str | None,
-    ) -> tuple[int, int | None, str, str | None]:
-        cleanDiscordId = str(discordId or "").strip()
-        parsedDiscordId = self._parseDiscordId(cleanDiscordId)
-        if cleanDiscordId and parsedDiscordId is None:
-            return 0, None, "", "Please provide a valid Discord user ID or mention."
-        if member is not None and parsedDiscordId is not None:
-            return 0, None, "", "Please provide either a Discord member or Discord ID for one side, not both."
-
-        resolvedDiscordId = int(getattr(member, "id", 0) or parsedDiscordId or 0)
-        resolvedRobloxId: int | None = None
-        resolvedRobloxUsername = str(robloxUsername or "").strip()
-
-        if resolvedRobloxUsername:
-            lookup = await robloxUsers.fetchRobloxUserByUsername(resolvedRobloxUsername)
-            if lookup.robloxId:
-                resolvedRobloxId = int(lookup.robloxId)
-            if lookup.robloxUsername:
-                resolvedRobloxUsername = str(lookup.robloxUsername)
-        elif resolvedDiscordId > 0:
-            lookup = await robloxUsers.fetchRobloxUser(resolvedDiscordId, int(guild.id))
-            if lookup.robloxId:
-                resolvedRobloxId = int(lookup.robloxId)
-            if lookup.robloxUsername:
-                resolvedRobloxUsername = str(lookup.robloxUsername)
-
-        if resolvedDiscordId <= 0 and not resolvedRobloxUsername and not resolvedRobloxId:
-            return 0, None, "", "Each side needs a Discord identity or Roblox username."
-        return resolvedDiscordId, resolvedRobloxId, resolvedRobloxUsername, None
-
-    @app_commands.command(
-        name="bg-alt-link",
-        description="Record a confirmed, related, or cleared alt relationship for BG intelligence.",
-    )
-    @app_commands.guild_only()
-    @app_commands.describe(
-        status="How Jane should treat the relationship.",
-        source_member="First Discord member, if known.",
-        source_discord_id="First Discord user ID or mention, if not a member.",
-        source_roblox_username="First Roblox username, if known.",
-        target_member="Second Discord member, if known.",
-        target_discord_id="Second Discord user ID or mention, if not a member.",
-        target_roblox_username="Second Roblox username, if known.",
-        note="Optional reviewer note.",
-    )
-    @app_commands.choices(
-        status=[
-            app_commands.Choice(name="Confirmed alt", value="CONFIRMED"),
-            app_commands.Choice(name="Related / allowed", value="RELATED"),
-            app_commands.Choice(name="Cleared / not an alt", value="CLEARED"),
-        ]
-    )
-    async def bgAltLink(
-        self,
-        interaction: discord.Interaction,
-        status: app_commands.Choice[str],
-        source_member: discord.Member | None = None,
-        source_discord_id: str | None = None,
-        source_roblox_username: str | None = None,
-        target_member: discord.Member | None = None,
-        target_discord_id: str | None = None,
-        target_roblox_username: str | None = None,
-        note: str | None = None,
-    ) -> None:
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return await self._safeEphemeral(interaction, "This command can only be used inside a server.")
-        if not self._canUse(interaction.user):
-            return await self._safeEphemeral(interaction, "You do not have permission to record BG alt links.")
-
-        await interactionRuntime.safeInteractionDefer(interaction, ephemeral=True, thinking=True)
-        sourceDiscordId, sourceRobloxId, sourceRobloxName, sourceError = await self._resolveAltLinkEndpoint(
-            guild=interaction.guild,
-            member=source_member,
-            discordId=source_discord_id,
-            robloxUsername=source_roblox_username,
-        )
-        if sourceError:
-            return await self._finishBgIntelStatus(interaction, f"Source identity error: {sourceError}")
-        targetDiscordId, targetRobloxId, targetRobloxName, targetError = await self._resolveAltLinkEndpoint(
-            guild=interaction.guild,
-            member=target_member,
-            discordId=target_discord_id,
-            robloxUsername=target_roblox_username,
-        )
-        if targetError:
-            return await self._finishBgIntelStatus(interaction, f"Target identity error: {targetError}")
-        if (
-            sourceDiscordId > 0
-            and sourceDiscordId == targetDiscordId
-            and (sourceRobloxId or 0) == (targetRobloxId or 0)
-            and (sourceRobloxName or "").lower() == (targetRobloxName or "").lower()
-        ):
-            return await self._finishBgIntelStatus(interaction, "Those identities are the same endpoint.")
-
-        linkId = await service.recordAltLink(
-            guildId=int(interaction.guild.id),
-            createdBy=int(interaction.user.id),
-            status=str(status.value),
-            sourceDiscordUserId=sourceDiscordId,
-            sourceRobloxUserId=sourceRobloxId,
-            sourceRobloxUsername=sourceRobloxName,
-            targetDiscordUserId=targetDiscordId,
-            targetRobloxUserId=targetRobloxId,
-            targetRobloxUsername=targetRobloxName,
-            note=str(note or "").strip(),
-        )
-        statusLabel = {
-            "CONFIRMED": "confirmed alt",
-            "RELATED": "related / allowed",
-            "CLEARED": "cleared / not an alt",
-        }.get(str(status.value), str(status.value))
-        await self._finishBgIntelStatus(
-            interaction,
-            f"Recorded BG alt link #{int(linkId)} as **{statusLabel}**. Future `/bg-intel` scans will use it.",
-        )
-
     @app_commands.command(
         name="bg-intel",
         description="Run Jane's standalone Roblox background intelligence report.",
     )
     @app_commands.guild_only()
     @app_commands.describe(
-        member="The Discord member to analyze. Optional if a Discord ID or Roblox username is supplied.",
-        discord_id="Optional Discord user ID. Paste as plain ID or mention.",
+        member="Discord member mention or user ID. Optional if a Roblox username is supplied.",
         roblox_username="Optional Roblox username. Can be used without a Discord member.",
-        notify_private_inventory="DM the user if their inventory is private or hidden. Defaults to off.",
-        text_report="Attach the full text report dump. Defaults to no.",
+        debug="Force-attach the text report and include per-step scan timings. Defaults to no.",
     )
+    @app_commands.rename(roblox_username="roblox-username")
     async def bgIntel(
         self,
         interaction: discord.Interaction,
-        member: discord.Member | None = None,
-        discord_id: str | None = None,
+        member: str | None = None,
         roblox_username: str | None = None,
-        notify_private_inventory: bool = False,
-        text_report: bool = False,
+        debug: bool = False,
     ) -> None:
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return await self._safeEphemeral(interaction, "This command can only be used inside a server.")
         if not self._canUse(interaction.user):
             return await self._safeEphemeral(interaction, "You do not have permission to run BG intelligence scans.")
         cleanRobloxUsername = str(roblox_username or "").strip()
-        cleanDiscordId = str(discord_id or "").strip()
-        parsedDiscordId = self._parseDiscordId(cleanDiscordId)
-        if cleanDiscordId and parsedDiscordId is None:
-            return await self._safeEphemeral(interaction, "Please provide a valid Discord user ID or mention.")
-        if member is not None and parsedDiscordId is not None:
-            return await self._safeEphemeral(interaction, "Please provide either a Discord member or Discord ID, not both.")
-        if member is None and parsedDiscordId is None and not cleanRobloxUsername:
+        cleanMember = str(member or "").strip()
+        parsedDiscordId = self._parseDiscordId(cleanMember)
+        if cleanMember and parsedDiscordId is None:
+            return await self._safeEphemeral(interaction, "Please provide a valid Discord member mention or user ID.")
+        if parsedDiscordId is None and not cleanRobloxUsername:
             return await self._safeEphemeral(
                 interaction,
-                "Please provide a Discord member, a Discord ID, or a Roblox username.",
+                "Please provide a Discord member mention, a Discord user ID, or a Roblox username.",
             )
 
         await interactionRuntime.safeInteractionDefer(
@@ -823,20 +1070,30 @@ class BgIntelligenceCog(commands.Cog):
         )
 
         targetLabel = str(
-            getattr(member, "display_name", None)
+            cleanMember
             or cleanRobloxUsername
             or parsedDiscordId
             or "selected user"
         )
-        progressUpdater: ProgressUpdater = lambda status: self._editBgIntelStatus(
-            interaction,
-            status,
-            targetLabel=targetLabel,
-        )
+        debugEnabled = bool(debug)
+
+        async def rawProgressUpdater(status: str) -> bool:
+            return await self._editBgIntelStatus(
+                interaction,
+                status,
+                targetLabel=targetLabel,
+            )
+
+        debugTracker = BgIntelDebugTracker(enabled=debugEnabled)
+        progressRelay = BgIntelProgressRelay(rawProgressUpdater)
+
+        async def progressUpdater(status: str) -> bool:
+            return await debugTracker.update(progressRelay.update, status)
+
         await progressUpdater("Checking Discord membership and main-server lookup...")
 
-        targetMember = member
-        if targetMember is None and parsedDiscordId is not None:
+        targetMember = None
+        if parsedDiscordId is not None:
             targetMember = await self._fetchGuildMemberById(interaction.guild, parsedDiscordId)
         targetDiscordId = int(getattr(targetMember, "id", 0) or parsedDiscordId or 0)
         mainGuildMember = (
@@ -847,11 +1104,6 @@ class BgIntelligenceCog(commands.Cog):
         scanMember = targetMember or mainGuildMember
         roverMember = mainGuildMember or targetMember
         roverGuildId = int(getattr(getattr(roverMember, "guild", None), "id", 0) or 0) if roverMember is not None else None
-        if member is not None and member.bot:
-            return await self._finishBgIntelStatus(
-                interaction,
-                "That is a bot account. Jane is not emotionally prepared to background-check the appliances.",
-            )
         if targetMember is not None and targetMember.bot:
             return await self._finishBgIntelStatus(
                 interaction,
@@ -871,10 +1123,11 @@ class BgIntelligenceCog(commands.Cog):
                     reviewBucketOverride="adult",
                     roverGuildId=roverGuildId,
                     robloxUsernameOverride=cleanRobloxUsername or None,
-                    notifyPrivateInventory=bool(notify_private_inventory),
+                    notifyPrivateInventory=False,
                     reviewer=interaction.user,
                     configModule=config,
                     progressCallback=progressUpdater,
+                    debugTimingRecorder=debugTracker.record,
                 )
             elif parsedDiscordId is not None:
                 report = await service.buildReportForDiscordId(
@@ -886,6 +1139,7 @@ class BgIntelligenceCog(commands.Cog):
                     reviewBucketOverride="adult",
                     configModule=config,
                     progressCallback=progressUpdater,
+                    debugTimingRecorder=debugTracker.record,
                 )
             else:
                 report = await service.buildReportForRobloxIdentity(
@@ -894,6 +1148,7 @@ class BgIntelligenceCog(commands.Cog):
                     reviewBucketOverride="adult",
                     configModule=config,
                     progressCallback=progressUpdater,
+                    debugTimingRecorder=debugTracker.record,
                 )
             await progressUpdater("Scoring the completed scan...")
             riskScore = scoring.scoreReport(report, configModule=config)
@@ -931,14 +1186,52 @@ class BgIntelligenceCog(commands.Cog):
             report=report,
             riskScore=riskScore,
             reportId=reportId,
-            includeTextReport=bool(text_report),
+            includeTextReport=debugEnabled,
+            debugMode=debugEnabled,
             roverGuildId=roverGuildId,
             robloxUsernameOverride=cleanRobloxUsername or None,
-            notifyPrivateInventory=bool(notify_private_inventory),
+            notifyPrivateInventory=False,
         )
         embed, files = view._buildPublicPayload("overview")
         await progressUpdater("Posting the overview...")
-        await self._sendBgIntelMessage(interaction, embed=embed, view=view, files=files)
+        sentMessage = await self._sendBgIntelMessage(interaction, embed=embed, view=view, files=files)
+        timingSummary = debugTracker.finish()
+        if timingSummary is not None:
+            setattr(report, "debugTimingSummary", timingSummary)
+            if sentMessage is not None:
+                finalEmbed, finalFiles = view._buildPublicPayload("overview")
+                await interactionRuntime.safeMessageEdit(
+                    sentMessage,
+                    embed=finalEmbed,
+                    view=view,
+                    attachments=finalFiles,
+                )
+        await progressUpdater("Updating the BGC spreadsheet link...")
+        sheetUpdate = await _updateBgIntelSheetLinkSafe(
+            report=report,
+            riskScore=riskScore,
+            reportId=reportId,
+            message=sentMessage,
+            guildId=int(interaction.guild.id),
+        )
+        postedText = (
+            f"Background-check overview posted in <#{int(sentMessage.channel.id)}>."
+            if sentMessage is not None
+            else "I couldn't post the background-check overview in the configured channel."
+        )
+        if sheetUpdate.updated:
+            await self._finishBgIntelStatus(
+                interaction,
+                (
+                    f"{postedText}\n"
+                    f"Updated `Jane Intel` on `{sheetUpdate.spreadsheet_title or 'BGC spreadsheet'}` "
+                    f"row `{sheetUpdate.row_number}`."
+                ),
+            )
+        else:
+            reason = str(sheetUpdate.reason or "").strip()
+            suffix = f"\nSheet link not updated: {reason}" if reason else ""
+            await self._finishBgIntelStatus(interaction, postedText + suffix)
 
 
 async def setup(bot: commands.Bot):

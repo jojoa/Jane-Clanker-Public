@@ -151,12 +151,21 @@ async def handleJaneRuntime(router: Any, message: discord.Message) -> bool:
             gitStats = {}
     if gitStats:
         lastCheckAt = str(gitStats.get("lastCheckAt") or "").strip()
+        lastError = str(gitStats.get("lastError") or "").strip()
+        if len(lastError) > 180:
+            lastError = lastError[:177] + "..."
         gitLines = [
-            f"lastPull: {router._formatIsoTimestampOrNever(lastCheckAt)}",
-            f"lastUpdate: {router._formatIsoTimestampOrNever(gitStats.get('lastUpdateAt'))}",
+            f"enabled: `{bool(gitStats.get('enabled'))}`",
+            f"worker: `{'running' if bool(gitStats.get('workerRunning')) else 'stopped'}`",
+            f"lastCheck: {router._formatIsoTimestampOrNever(lastCheckAt)}",
+            f"last updated: {router._formatIsoTimestampOrNever(gitStats.get('lastUpdateAt'))}",
+            f"result: `{str(gitStats.get('lastResult') or 'idle')}`",
+            f"behind: `{int(gitStats.get('lastBehindCount') or 0)}`",
         ]
+        if lastError:
+            gitLines.append(f"error: `{lastError}`")
         embed.add_field(
-            name="Most Recent Git Pull",
+            name="Git Updater",
             value="\n".join(gitLines),
             inline=False,
         )
@@ -256,6 +265,141 @@ async def handleJaneRuntime(router: Any, message: discord.Message) -> bool:
     return True
 
 
+def _canUseViewAllChannels(router: Any, member: discord.Member) -> bool:
+    return bool(
+        member.guild_permissions.administrator
+        or router._headDeveloperAllowed(int(member.id))
+    )
+
+
+def _sortedGuildChannels(guild: discord.Guild) -> list[discord.abc.GuildChannel]:
+    return sorted(
+        list(guild.channels),
+        key=lambda channel: (
+            0 if isinstance(channel, discord.CategoryChannel) else 1,
+            int(getattr(channel, "position", 0) or 0),
+            str(getattr(channel, "name", "") or "").lower(),
+            int(getattr(channel, "id", 0) or 0),
+        ),
+    )
+
+
+async def handleViewAllChannels(router: Any, message: discord.Message) -> bool:
+    if message.author.bot or not message.content:
+        return False
+
+    token = router.firstLowerToken(message.content or "")
+    if token != "!viewallchannels":
+        return False
+
+    if not message.guild or not isinstance(message.author, discord.Member):
+        return False
+
+    guild = message.guild
+    member = message.author
+    if not _canUseViewAllChannels(router, member):
+        try:
+            await message.channel.send(
+                "Administrator or Jane developer access required.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            pass
+        return True
+
+    await router._deleteSourceIfManageable(message)
+
+    if not message.role_mentions:
+        await message.channel.send(
+            "Usage: `!viewallchannels @role`",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    role = message.role_mentions[0]
+    if role.is_default():
+        await message.channel.send(
+            "I will not apply this to `@everyone`.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    me = guild.me
+    if me is None:
+        await message.channel.send(
+            "I could not find my server member state.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+    if not (me.guild_permissions.manage_roles or me.guild_permissions.administrator):
+        await message.channel.send(
+            "I need Manage Roles permission to edit channel role overwrites.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    status = await message.channel.send(
+        f"Opening visible-channel access for `{role.name}`...",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    changed = 0
+    skipped = 0
+    failed = 0
+    channels = _sortedGuildChannels(guild)
+    reason = f"View all channels command by {member} ({member.id})"
+
+    for index, channel in enumerate(channels, start=1):
+        overwrite = channel.overwrites_for(role)
+        if overwrite.view_channel is True:
+            skipped += 1
+            continue
+
+        overwrite.view_channel = True
+        try:
+            await router.taskBudgeter.runLowPriorityDiscord(
+                lambda channel=channel, overwrite=overwrite: channel.set_permissions(
+                    role,
+                    overwrite=overwrite,
+                    reason=reason,
+                )
+            )
+            changed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+        except Exception:
+            failed += 1
+
+        if index % 10 == 0:
+            try:
+                await router.taskBudgeter.runLowPriorityDiscord(
+                    lambda: status.edit(
+                        content=(
+                            f"Opening visible-channel access for `{role.name}`... "
+                            f"`{index}/{len(channels)}` checked."
+                        ),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(0.25)
+
+    try:
+        await router.taskBudgeter.runLowPriorityDiscord(
+            lambda: status.edit(
+                content=(
+                    f"Done. `{role.name}` can now view more channels.\n"
+                    f"Updated: `{changed}` | Already allowed: `{skipped}` | Failed: `{failed}`"
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        )
+    except Exception:
+        pass
+    return True
+
+
 async def handleJaneTerminal(router: Any, message: discord.Message) -> bool:
     if message.author.bot or not message.content:
         return False
@@ -329,7 +473,7 @@ async def handleAllowServer(router: Any, message: discord.Message) -> bool:
     if status == "already":
         response = "This server is already in Jane's allowed guild list."
     elif status == "runtime-only":
-        response = "Added this server for the current runtime, but Jane could not persist it into config.py."
+        response = "Added this server for the current runtime, but Jane could not persist it into settings/core.py."
     elif status == "added":
         response = "Added this server to Jane's allowed guild list."
     else:

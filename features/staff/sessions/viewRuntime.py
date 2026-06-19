@@ -138,7 +138,7 @@ async def getCachedUser(bot: discord.Client, userId: int) -> Optional[discord.ab
 
 
 async def getCachedChannel(bot: discord.Client, channelId: int) -> Optional[object]:
-    key = int(channelId)
+    key = channelId
     cached = _cachedChannelsById.get(key)
     if cached and _cacheIsFresh(cached[0]):
         return cached[1]
@@ -232,7 +232,7 @@ async def requestSessionMessageUpdate(
     sessionId: int,
     *,
     delaySec: Optional[float] = None,
-) -> None:
+) -> bool | None:
     debounceDelaySec = float(
         delaySec
         if delaySec is not None
@@ -243,7 +243,7 @@ async def requestSessionMessageUpdate(
     _sessionMessageUpdateDirty.add(sessionId)
     existing = _sessionMessageUpdateTasks.get(sessionId)
     if existing and not existing.done():
-        return
+        return False
 
     async def _runner() -> None:
         try:
@@ -264,6 +264,7 @@ async def requestSessionMessageUpdate(
             _sessionMessageUpdateDirty.discard(sessionId)
 
     _sessionMessageUpdateTasks[sessionId] = asyncio.create_task(_runner())
+    return None
 
 
 def _queueRepostIntervalSec() -> int:

@@ -8,7 +8,26 @@ It is based on:
 - the imported public-branch scaffolding
 - the follow-up transcript explaining how HG actually wants the system to work
 
-This is not a finished implementation doc. It is the working contract we should code against so we stop mixing draft branch assumptions with the real workflow.
+This is not a finished implementation doc. It is the working contract we should code against so future changes have one shared reference point.
+
+## Current Public-Branch Sync Rule
+
+The public `Honor-Guard` branch is useful. It is a more recent branch of HG work, and parts of it were manually merged into this repo earlier. Because that merge was selective, the branch and the local private repo are now two related but diverged versions of the same feature.
+
+Use it as history for:
+
+- the `/honorguard-award-points` shape
+- the review buttons for point awards
+- the general idea that HG work should be public-safe when possible
+
+When bringing public-branch work back into the private repo, port it selectively and think about these areas with the current backend:
+
+- the `hg_main` member-state table draft
+- the branch's point-award table fields
+- exported config differences from the public branch
+- placeholder commands that may not include later private-repo behavior
+
+The local private repo should keep the current submission-based model unless we intentionally migrate it. It should also preserve branch-facing command language where that helps staff muscle memory. For example, manual point awards still expose `event-points` in the command while the service maps that into the current awarded-point accounting rows.
 
 ## Where It Lives
 
@@ -56,6 +75,7 @@ For the current private-repo design, Jane should treat the Honor Guard workbook 
 That means:
 
 - the member sheet is the current HG ORBAT-like member state
+- the schedule sheet is the live upcoming-event list
 - the archive sheet is the finished-event history
 - the event-host sheet tracks hosted-event counts and type totals
 
@@ -65,7 +85,7 @@ The database is not just a testing layer. It is the durable internal record Jane
 
 The database should not become a second competing copy of the full member ORBAT unless we explicitly decide to do that later.
 
-This is one of the main places where the old public branch drifted. That branch experimented with an `hg_main` style DB copy. The current private repo should not assume that model.
+This is one of the main places where the public branch and private repo ended up with different assumptions. The branch experimented with an `hg_main` style DB copy. The current private repo should not assume that model unless we decide to migrate toward it on purpose.
 
 ## Non-Goals For Phase 1
 
@@ -74,7 +94,7 @@ Do not try to replace Apollo immediately.
 The intended order is:
 
 - make logging work first
-- add archive second
+- add archive/schedule cleanup second
 - only consider full scheduling / announcements later if HG still wants it
 
 Jane's core value here is logging and workflow state, not replacing an existing event scheduler just because one already exists.
@@ -97,7 +117,7 @@ Expected behavior:
 - 30 minutes required
 - evidence attachments required
 - manual review required
-- earns 0 quota point
+- earns 1 quota point
 - earns 1 promotion event point
 
 Do not fully automate acceptance for solo sentry. HG explicitly wants fraud resistance here.
@@ -165,9 +185,6 @@ For exams:
   `2` points even without grading
 - `NCO exam` screen-assist plus grading
   `2` plus personal graded-attendee points
-
-The Host cannot get less Points than Cohosts, so if a cohost gets more by the rules, the Host automaticaly get the same amount.
-Example: NCO Exam with Cohost screen assist and grading 5 People gets 10 while the Host would only get 8
 
 Co-hosts and supervisors should receive points like attendees unless the specific event rule says otherwise.
 
@@ -270,6 +287,7 @@ This is the main event-level object for:
 - host
 - attendee count
 - archive sync
+- schedule removal
 - host-stat updates
 
 ### `hg_quota_cycles`
@@ -290,9 +308,10 @@ When a hosted event is finalized, Jane should:
 
 1. sync the relevant member point deltas
 2. append the event to the archive sheet
-3. increment the host's event-host stats
+3. remove or mark the event from the schedule sheet
+4. increment the host's event-host stats
 
-That archive/host-stat duo is part of the real workflow, not an optional nice-to-have.
+That archive/schedule/host-stat trio is part of the real workflow, not an optional nice-to-have.
 
 ## Permissions
 
@@ -323,15 +342,16 @@ More specifically, the project roadmap implied by the chat is:
 4. event attendance logs next
 5. officer host / co-host / supervisor handling
 6. solo-sentry daily lockout
-7. archive updates
+7. archive / schedule updates
 8. bi-weekly quota reset and status update tooling
 9. promotion-readiness reporting
 10. only after live testing, consider heavier automation like promo automation
 
 ## Practical Rule
 
-When branch code, transcript guesses, and current private backend disagree:
+When branch code, transcript notes, and current private backend are not aligned:
 
 - prefer the real HG workflow described in the transcript
-- prefer the private repo's newer table/service model over the older public-branch DB draft
+- prefer the private repo's current table/service model unless we intentionally migrate it
 - do not introduce a second member-state source of truth unless we explicitly choose that on purpose
+- keep public-facing command names stable when existing branch users may have learned them

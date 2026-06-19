@@ -8,9 +8,9 @@ from discord import Interaction, Member, VoiceChannel, VoiceState, app_commands
 from discord.ext import commands
 
 from config import (
-    _canCreateVoiceChatAll,
-    _canCreateVoiceChatBasic,
     serverId,
+    canCreateVoiceChatBasic,
+    canCreateVoiceChatAll,
 )
 from features.staff.voiceChat.voiceChatManager import (
     cleanVoiceChatsCategory,
@@ -36,10 +36,10 @@ _DELETABLE_VOICE_CHAT_CHOICES = [
     *_VOICE_CHAT_CHOICES,
 ]
 _VOICE_CHAT_PERMISSION_CHECKS: dict[str, Callable[[Member], bool]] = {
-    "Shift": lambda member: _hasAnyRole(member, _canCreateVoiceChatAll),
-    "Gamenight": lambda member: _hasAnyRole(member, _canCreateVoiceChatBasic),
-    "Breakroom": lambda member: _hasAnyRole(member, _canCreateVoiceChatBasic),
-    "Supervisor comms": lambda member: _hasAnyRole(member, _canCreateVoiceChatAll),
+    "Shift": lambda member: _hasAnyRole(member, canCreateVoiceChatAll),
+    "Gamenight": lambda member: _hasAnyRole(member, canCreateVoiceChatBasic),
+    "Breakroom": lambda member: _hasAnyRole(member, canCreateVoiceChatBasic),
+    "Supervisor comms": lambda member: _hasAnyRole(member, canCreateVoiceChatAll),
 }
 
 
@@ -134,7 +134,7 @@ class VoiceChatCog(commands.Cog):
     @app_commands.command(name="clean-voice-chats", description="Clean temporary voice chat channels in the configured category.")
     @app_commands.guild_only()
     async def cleanVoiceChats(self, interaction: Interaction) -> None:
-        if not _hasAnyRole(interaction.user, _canCreateVoiceChatAll):
+        if not _hasAnyRole(interaction.user, canCreateVoiceChatAll):
             await self._safeEphemeral(interaction, "Sorry, you can't clean voice chat channels.")
             return
 

@@ -24,6 +24,7 @@ from features.community.reminders import (
 )
 from runtime import interaction as interactionRuntime
 from runtime import permissions as runtimePermissions
+from runtime import taskBudgeter
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +95,9 @@ class ReminderCog(commands.Cog):
         channel = self.bot.get_channel(int(channelId))
         if channel is None:
             try:
-                channel = await self.bot.fetch_channel(int(channelId))
+                channel = await taskBudgeter.runLowPriorityDiscord(
+                    lambda: self.bot.fetch_channel(int(channelId))
+                )
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 return None
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
@@ -174,7 +177,7 @@ class ReminderCog(commands.Cog):
         user = self.bot.get_user(userId)
         if user is None:
             try:
-                user = await self.bot.fetch_user(userId)
+                user = await taskBudgeter.runLowPriorityDiscord(lambda: self.bot.fetch_user(userId))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 user = None
 
@@ -182,7 +185,7 @@ class ReminderCog(commands.Cog):
         dmDelivered = False
         if user is not None:
             try:
-                await user.send(embed=embed, view=view)
+                await taskBudgeter.runLowPriorityDiscord(lambda: user.send(embed=embed, view=view))
                 dmDelivered = True
             except (discord.Forbidden, discord.HTTPException):
                 dmDelivered = False
@@ -191,11 +194,13 @@ class ReminderCog(commands.Cog):
             channel = await self._getReminderChannel(channelId)
             if channel is not None:
                 try:
-                    await channel.send(
-                        content=f"<@{userId}> reminder:",
-                        embed=embed,
-                        view=view,
-                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                    await taskBudgeter.runLowPriorityDiscord(
+                        lambda: channel.send(
+                            content=f"<@{userId}> reminder:",
+                            embed=embed,
+                            view=view,
+                            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                        )
                     )
                 except (discord.Forbidden, discord.HTTPException):
                     pass
@@ -209,10 +214,12 @@ class ReminderCog(commands.Cog):
         creatorId = int(row.get("userId") or 0)
         prefix = f"{roleMentions}\n" if roleMentions else ""
         try:
-            await channel.send(
-                content=f"{prefix}Team reminder from <@{creatorId}>:",
-                embed=embed,
-                allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
+            await taskBudgeter.runLowPriorityDiscord(
+                lambda: channel.send(
+                    content=f"{prefix}Team reminder from <@{creatorId}>:",
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
+                )
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -252,11 +259,19 @@ class ReminderCog(commands.Cog):
 
     async def _runReminderTick(self) -> None:
         now = datetime.now(timezone.utc)
-        dueRows = await listDueReminders(now.isoformat(), limit=50)
+        batchLimit = max(1, min(50, int(getattr(config, "reminderDueBatchLimit", 20) or 20)))
+        dueRows = await listDueReminders(now.isoformat(), limit=batchLimit)
         if not dueRows:
             return
+        concurrency = max(1, min(5, int(getattr(config, "reminderDeliveryConcurrency", 3) or 3)))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _boundedProcess(row: dict) -> None:
+            async with semaphore:
+                await self._processReminder(row, now=now)
+
         results = await asyncio.gather(
-            *(self._processReminder(row, now=now) for row in dueRows),
+            *(_boundedProcess(row) for row in dueRows),
             return_exceptions=True,
         )
         for result in results:
@@ -266,27 +281,7 @@ class ReminderCog(commands.Cog):
                     exc_info=(type(result), result, result.__traceback__),
                 )
 
-    @app_commands.command(name="reminder", description="Create, list, or cancel reminders.")
-    @app_commands.describe(
-        action="What reminder action to run.",
-        when="When to remind you. Required for add/team.",
-        reminder_text="Reminder text. Required for add/team.",
-        repeat="Optional repeat interval, such as 1d or 2w.",
-        role_ids="Role IDs to ping. Required for team reminders.",
-        reminder_id="Reminder ID to cancel. Required for cancel.",
-        attachment="Optional attachment to include with the reminder.",
-    )
-    @app_commands.rename(reminder_text="reminder-text")
-    @app_commands.rename(role_ids="role-ids")
-    @app_commands.rename(reminder_id="reminder-id")
-    @app_commands.choices(
-        action=[
-            app_commands.Choice(name="Add personal reminder", value="add"),
-            app_commands.Choice(name="Add team reminder", value="team"),
-            app_commands.Choice(name="List my reminders", value="list"),
-            app_commands.Choice(name="Cancel reminder", value="cancel"),
-        ]
-    )
+    # Legacy slash handler kept for future reuse.
     async def reminderCommand(
         self,
         interaction: discord.Interaction,

@@ -25,8 +25,8 @@ The important idea: a session is not just a Discord message. It is database stat
 - `/orientation`
   Starts an orientation session in the current text channel.
 
-- `/bg-check`
-  Creates a background-check queue from pending users without running a full orientation session.
+- `/bg-add`
+  Adds a Discord user to the next BGC spreadsheet Jane creates after an orientation.
 
 ## Orientation Flow
 
@@ -35,20 +35,25 @@ The normal happy path looks like this:
 1. An instructor runs `/orientation password:<value>`.
 2. Jane creates a `sessions` row with status `OPEN`.
 3. Jane posts the orientation message with a persistent `SessionView`.
-4. Attendees press the join button and enter the password in a modal.
-5. Jane stores each attendee in the `attendees` table.
-6. The host presses `Change Grade`.
-7. Jane moves the session to `GRADING` and shows host-only grading controls.
-8. The host marks attendees as `PASS` or `FAIL`.
-9. The host presses `Finish`.
-10. Jane posts BG queues for passing attendees.
-11. If all needed BG queues post successfully, Jane posts orientation results, marks the session `FINISHED`, and deletes the live session message.
+4. Ten minutes after the orientation session is created, Jane starts a low-priority RoVer warmup sweep across the attendee list.
+5. Attendees press the join button and enter the password in a modal.
+6. Jane stores each attendee in the `attendees` table.
+7. The host presses `Change Grade`.
+8. Jane moves the session to `GRADING` and shows host-only grading controls.
+9. The host marks attendees as `PASS` or `FAIL`.
+10. The host presses `Finish`.
+11. Jane posts orientation results, marks the session `FINISHED`, and deletes the live session message.
+12. Jane creates the BGC spreadsheet for passing attendees plus any pending `/bg-add` users in the background and posts the link when it is ready.
 
-This flow is live, but treat `Finish` carefully. It posts queues, posts results, changes session state, and kicks off follow-up work.
+This flow is live, but treat `Finish` carefully. It posts results, changes session state, and kicks off follow-up spreadsheet work.
+
+The warmup sweep uses the shared Roblox API budget at a lower priority than normal commands and review tools. `/bg-intel`, recruitment work, ORBAT lookups, and similar foreground requests can move ahead of it even if warmup requests are already queued.
 
 ## BG Queue Flow
 
 Only passing attendees become BG candidates.
+
+Users queued with `/bg-add` are not added to the live orientation review queue and do not cause a spreadsheet by themselves. They are appended to the next orientation BGC spreadsheet for that server, then marked consumed so they do not appear again on a later sheet. If an orientation has no passing attendees and Jane skips spreadsheet creation, the queued `/bg-add` users stay pending.
 
 Jane routes each passing attendee into a review bucket with this priority:
 
@@ -90,7 +95,7 @@ When a reviewer approves a candidate:
 
 1. The attendee row is marked `APPROVED`.
 2. Any active claim for that attendee is cleared.
-3. If this is an orientation or BG-check session, Jane removes the pending BG role.
+3. If this is an orientation session, Jane removes the pending BG role.
 4. If this is an orientation session, Jane can award the host point.
 5. Jane refreshes the session and BG queue messages.
 6. Jane may attempt Roblox group auto-accept.

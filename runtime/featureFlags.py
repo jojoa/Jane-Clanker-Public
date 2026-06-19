@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from db.sqlite import execute, fetchAll, fetchOne
+
+log = logging.getLogger(__name__)
 
 
 def _safeInt(value: object) -> int:
@@ -32,6 +36,7 @@ class FeatureFlagService:
         self.config = configModule
         self._cache: dict[tuple[int, str], tuple[bool, datetime]] = {}
         self._cacheTtl = timedelta(seconds=60)
+        self._backgroundRefreshes: set[tuple[int, str]] = set()
 
     def _defaultEnabled(self, featureKey: str) -> bool:
         defaults = getattr(self.config, "featureFlagDefaults", {}) or {}
@@ -155,6 +160,51 @@ class FeatureFlagService:
             return True, ""
         enabled = await self.getFlag(guildId, featureKey)
         return enabled, featureKey
+
+    def isCommandEnabledCached(self, guildId: int, commandName: str) -> tuple[bool, str, bool]:
+        featureKey = self._commandFeatureKey(commandName)
+        safeGuildId = _safeInt(guildId)
+        if safeGuildId <= 0 or not featureKey:
+            return True, featureKey, True
+        cached = self._readCache(safeGuildId, featureKey)
+        if cached is not None:
+            return cached, featureKey, True
+        return self._defaultEnabled(featureKey), featureKey, False
+
+    async def _refreshFlagCache(self, guildId: int, featureKey: str) -> None:
+        key = self._cacheKey(guildId, featureKey)
+        try:
+            await self.getFlag(guildId, featureKey)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "Feature flag background refresh failed for guild=%s feature=%s: %s",
+                guildId,
+                featureKey,
+                exc,
+                extra={"skipErrorMirrorDm": True},
+            )
+        finally:
+            self._backgroundRefreshes.discard(key)
+
+    def refreshCommandFlagCacheSoon(self, guildId: int, commandName: str) -> None:
+        safeGuildId = _safeInt(guildId)
+        featureKey = self._commandFeatureKey(commandName)
+        if safeGuildId <= 0 or not featureKey:
+            return
+        key = self._cacheKey(safeGuildId, featureKey)
+        if key in self._backgroundRefreshes:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._backgroundRefreshes.add(key)
+        loop.create_task(
+            self._refreshFlagCache(safeGuildId, featureKey),
+            name=f"feature-flag-refresh:{safeGuildId}:{featureKey}",
+        )
 
     async def exportFlagsJson(self, guildId: int) -> str:
         rows = await self.listFlags(guildId)

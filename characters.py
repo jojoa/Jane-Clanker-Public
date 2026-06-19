@@ -59,10 +59,40 @@ ALT_ACCOUNT_WORDS = (
 _USERNAME_KEY_RE = re.compile(r"[^a-z0-9]+", re.IGNORECASE)
 _SEPARATOR_PATTERN = r"(?:[\s\W_]*?)"
 _EMPTY_MATCH_RE = re.compile(r"a\A")
+_CANONICAL_CHAR_ALIASES = {
+    "@": "a",
+    "0": "o",
+    "1": "i",
+    "2": "z",
+    "3": "e",
+    "4": "a",
+    "5": "s",
+    "6": "g",
+    "7": "t",
+    "8": "b",
+    "9": "g",
+    "$": "s",
+    "+": "t",
+}
 
 
 def normalized_username_key(value: str) -> str:
     return _USERNAME_KEY_RE.sub("", str(value or "").strip().lower())
+
+
+def canonical_username_key(value: str) -> str:
+    pieces: list[str] = []
+    for character in str(value or "").strip().lower():
+        if character.isalpha():
+            pieces.append(character)
+            continue
+        mapped = _CANONICAL_CHAR_ALIASES.get(character)
+        if mapped:
+            pieces.append(mapped)
+            continue
+        if character.isdigit():
+            pieces.append(character)
+    return "".join(pieces)
 
 
 def _normalized_words(words: Iterable[str] | None) -> tuple[str, ...]:
@@ -71,6 +101,19 @@ def _normalized_words(words: Iterable[str] | None) -> tuple[str, ...]:
     seen: set[str] = set()
     for word in rawWords:
         key = normalized_username_key(str(word or ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    return tuple(normalized)
+
+
+def _canonicalized_words(words: Iterable[str] | None) -> tuple[str, ...]:
+    rawWords = tuple(words or ALT_ACCOUNT_WORDS)
+    normalized = []
+    seen: set[str] = set()
+    for word in rawWords:
+        key = canonical_username_key(str(word or ""))
         if not key or key in seen:
             continue
         seen.add(key)
@@ -151,17 +194,30 @@ def username_alt_match_reason(
     if candidateText.lower() == knownText.lower():
         return None
 
-    pattern = build_username_variant_regex(knownKey, altWords=altWords)
-    if not pattern.fullmatch(candidateText):
-        return None
-
-    markerWords = _normalized_words(altWords)
-    markerFound = any(word and word in candidateKey and word not in knownKey for word in markerWords)
-    if markerFound:
-        return "known member username with an alt/back-up marker"
     if candidateKey == knownKey:
         return "known member username with separator or case changes"
-    return "known member username with alternate characters"
+
+    if _has_trailing_digit_variant(candidateKey, knownKey):
+        return "known member username with alternate characters"
+
+    candidateCanonical = canonical_username_key(candidateText)
+    knownCanonical = canonical_username_key(knownText)
+    if len(candidateCanonical) < 3 or len(knownCanonical) < 3:
+        return None
+
+    if candidateCanonical == knownCanonical:
+        return "known member username with alternate characters"
+
+    markerCanonicalWords = set(_canonicalized_words(altWords))
+    if _has_alt_marker_variant(
+        candidateKey,
+        knownKey,
+        candidateCanonical,
+        knownCanonical,
+        markerCanonicalWords,
+    ):
+        return "known member username with an alt/back-up marker"
+    return None
 
 
 def looks_like_username_alt(
@@ -171,6 +227,77 @@ def looks_like_username_alt(
     altWords: Iterable[str] | None = None,
 ) -> bool:
     return username_alt_match_reason(candidate, knownUsername, altWords=altWords) is not None
+
+
+def _strip_leading_optional_digits(value: str) -> tuple[str, int]:
+    digitCount = 0
+    for character in str(value or ""):
+        if not character.isdigit():
+            break
+        digitCount += 1
+    if 1 <= digitCount <= 4:
+        return value[digitCount:], digitCount
+    return value, 0
+
+
+def _strip_trailing_optional_digits(value: str) -> tuple[str, int]:
+    digitCount = 0
+    for character in reversed(str(value or "")):
+        if not character.isdigit():
+            break
+        digitCount += 1
+    if 1 <= digitCount <= 4:
+        return value[:-digitCount], digitCount
+    return value, 0
+
+
+def _has_trailing_digit_variant(candidateKey: str, knownKey: str) -> bool:
+    stripped, digitCount = _strip_trailing_optional_digits(candidateKey)
+    return digitCount > 0 and stripped == knownKey
+
+
+def _has_alt_marker_variant(
+    candidateKey: str,
+    knownKey: str,
+    candidateCanonical: str,
+    knownCanonical: str,
+    markerCanonicalWords: set[str],
+) -> bool:
+    if (
+        not markerCanonicalWords
+        or not candidateKey
+        or not knownKey
+        or not candidateCanonical
+        or not knownCanonical
+    ):
+        return False
+
+    candidateKeyWithoutTrailingDigits, _ = _strip_trailing_optional_digits(candidateKey)
+    if candidateKeyWithoutTrailingDigits.startswith(knownKey):
+        suffix = candidateKeyWithoutTrailingDigits[len(knownKey):]
+        if canonical_username_key(suffix) in markerCanonicalWords:
+            return True
+        strippedSuffix, _ = _strip_leading_optional_digits(suffix)
+        if canonical_username_key(strippedSuffix) in markerCanonicalWords:
+            return True
+    if candidateKeyWithoutTrailingDigits.endswith(knownKey):
+        prefix = candidateKeyWithoutTrailingDigits[:-len(knownKey)]
+        if canonical_username_key(prefix) in markerCanonicalWords:
+            return True
+        strippedPrefix, _ = _strip_trailing_optional_digits(prefix)
+        if canonical_username_key(strippedPrefix) in markerCanonicalWords:
+            return True
+
+    candidateCanonicalWithoutTrailingDigits, _ = _strip_trailing_optional_digits(candidateCanonical)
+    if candidateCanonicalWithoutTrailingDigits.startswith(knownCanonical):
+        suffixCanonical = candidateCanonicalWithoutTrailingDigits[len(knownCanonical):]
+        if suffixCanonical in markerCanonicalWords:
+            return True
+    if candidateCanonicalWithoutTrailingDigits.endswith(knownCanonical):
+        prefixCanonical = candidateCanonicalWithoutTrailingDigits[:-len(knownCanonical)]
+        if prefixCanonical in markerCanonicalWords:
+            return True
+    return False
 
 
 def build_trigger_regex(triggerWords: dict[str, Iterable[str]] | None = None) -> re.Pattern[str]:
