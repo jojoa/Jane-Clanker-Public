@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 import discord
@@ -51,8 +52,8 @@ def buildPointAwardEmbed(submission: Mapping[str, Any]) -> discord.Embed:
     embed.add_field(name="Awarder", value=_mentionUser(submission.get("submitterId")), inline=False)
     embed.add_field(name="Awarded User", value=_mentionUser(awardedUserId), inline=False)
     embed.add_field(
-        name="Awarded Promotion Points",
-        value=_formatPoints(submission.get("promotionAwardedPoints")),
+        name="Awarded Points",
+        value=_formatPoints(submission.get("awardedPoints")),
         inline=True,
     )
     embed.add_field(name="Reason", value=reason, inline=False)
@@ -74,8 +75,8 @@ def buildSoloSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Emb
     embed.add_field(name="Duty Date", value=f"`{dutyDate}`", inline=True)
     embed.add_field(name="Minutes", value=f"`{minutes}`", inline=True)
     embed.add_field(
-        name="Promotion Event Points",
-        value=_formatPoints(submission.get("promotionEventPoints")),
+        name="Event Points",
+        value=_formatPoints(submission.get("eventPoints")),
         inline=True,
     )
     embed.add_field(name="Status", value=statusIcon(str(submission.get("status") or "")), inline=False)
@@ -84,11 +85,14 @@ def buildSoloSentrySubmissionEmbed(submission: Mapping[str, Any]) -> discord.Emb
 def buildEventReviewEmbed(submission: dict, event: dict, allAttendees: list[dict]) -> discord.Embed:
     eventId = event.get("eventId")
     eventTitle = str(event.get("eventTitle") or "").strip() or f"Event {eventId}"
-    eventType = str(event.get("eventType") or "").strip() or "Unknown"
-    eventDate = str(event.get("eventDate") or "").strip() or "Unknown"
+    eventType = str(event.get("eventType") or "").strip().upper()  or "Unknown"
+    platoon = f"{str(event.get("platoon") or "")} "
+    if platoon == "none ":
+        platoon = ""
+    eventDate: datetime = event.get("eventDate") or datetime.now(tz=timezone.utc)
     imageUrls = submission.get("imageUrls") or []
     embed = discord.Embed(
-        title=f"Review for {eventType}",
+        title=f"Review for {platoon.upper()}{eventType}",
         description=f"**Event Title:** `{eventTitle}`",
         color=discord.Color.blue(),
     )
@@ -96,27 +100,35 @@ def buildEventReviewEmbed(submission: dict, event: dict, allAttendees: list[dict
     supervisors = filter(lambda x: str(x.get("participantRole")).upper() == "SUPERVISOR", allAttendees)
     cohosts = filter(lambda x: str(x.get("participantRole")).upper() == "COHOST", allAttendees)
 
-    attendeeMentions = [
-        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
-        for index, row in enumerate(attendees)
-        if int(row.get("userId") or 0) > 0
-    ]
+    attendeeMentions = []
+    if eventType.upper() == "JGE" or eventType.upper() == "NCOE":
+        attendeeMentions = [
+            f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("eventPoints")} points - Grade: {row.get('examGrade') or 'Not Graded'}"
+            for index, row in enumerate(attendees)
+            if int(row.get("userId") or 0) > 0
+        ]
+    else:
+        attendeeMentions = [
+            f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("eventPoints")} points"
+            for index, row in enumerate(attendees)
+            if int(row.get("userId") or 0) > 0
+        ]
     supervisorMentions = [
-        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("eventPoints")} points"
         for index, row in enumerate(supervisors)
         if int(row.get("userId") or 0) > 0
     ]
     cohostMentions = [
-        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("promotionEventPoints")} points"
+        f"{index + 1}. <@{int(row.get('userId') or 0)}> - {row.get("quotaPoints")}E{row.get("eventPoints")} points"
         for index, row in enumerate(cohosts)
         if int(row.get("userId") or 0) > 0
     ]
 
     host = next((row for row in allAttendees if int(row.get("userId") or 0) == event.get("hostId")), None)
-    hostMention = f"<@{int(host.get('userId') or 0)}> - {host.get("quotaPoints")}E{host.get("promotionEventPoints")} points"
+    hostMention = f"<@{int(host.get('userId') or 0)}> - {host.get("quotaPoints")}E{host.get("eventPoints")} points"
 
     embed.add_field(name="Duration", value=f"`{event.get("durationMinutes") or 0} minutes`", inline=True)
-    embed.add_field(name="Date", value=f"`{eventDate}`", inline=True)
+    embed.add_field(name="Date", value=f"<t:{int(eventDate.timestamp())}:s>", inline=True)
     embed.add_field(name="Submitter", value=_mentionUser(submission.get("submitterId")), inline=False)
     embed.add_field(name="Host", value=hostMention, inline=False)
     embed.add_field(
@@ -136,4 +148,29 @@ def buildEventReviewEmbed(submission: dict, event: dict, allAttendees: list[dict
     if submission.get("status") != "PENDING":
         reviewerMention = _mentionUser(submission.get("reviewerId"))
     embed.add_field(name="Status", value=statusIcon(str(submission.get("status") or ""), reviewerMention), inline=False)
+    return embed
+
+def buildHonorGuardGradingEmbed(session: dict, hostId: int, attendees: list[dict], gradingIndex: int) -> discord.Embed:
+    eventTitle = str(session.get("eventTitle") or "").strip() or f"Event {session.get('eventId')}"
+    eventDate = session.get("eventDate") or datetime.now(tz=timezone.utc)
+    embed = discord.Embed(
+        title=f"Grading for {eventTitle}",
+        description=f"**Date:** `<t:{int(eventDate.timestamp())}:s>`",
+        color=discord.Color.green(),
+    )
+    hostMention = f"<@{hostId}>"
+    embed.add_field(name="Host", value=hostMention, inline=False)
+
+    attendeeMentions = []
+    for index, row in enumerate(attendees):
+        if int(row.get("userId") or 0) > 0:
+            if index == gradingIndex:
+                attendeeMentions.append(f"{index + 1}. <@{int(row.get('userId') or 0)}> | Grade: {row.get('examGrade') or 'Not Graded yet'} <- Grading")
+            else:
+                attendeeMentions.append(f"{index + 1}. <@{int(row.get('userId') or 0)}> | Grade: {row.get('examGrade') or 'Not Graded yet'}")
+    embed.add_field(
+        name=f"Attendees ({len(attendeeMentions)}):\n",
+        value="\n".join(attendeeMentions) if attendeeMentions else "No attendees.",
+        inline=False,
+    )
     return embed

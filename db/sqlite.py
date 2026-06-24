@@ -1329,8 +1329,8 @@ async def initDb():
             eventTitle TEXT NOT NULL DEFAULT '',
             eventDate TEXT NOT NULL DEFAULT '',
             quotaPoints REAL NOT NULL DEFAULT 0,
-            promotionEventPoints REAL NOT NULL DEFAULT 0,
-            promotionAwardedPoints REAL NOT NULL DEFAULT 0,
+            eventPoints REAL NOT NULL DEFAULT 0,
+            awardedPoints REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'PENDING',
             reviewerId INTEGER NOT NULL DEFAULT 0,
             reviewNote TEXT NOT NULL DEFAULT '',
@@ -1380,14 +1380,17 @@ async def initDb():
             eventId INTEGER NOT NULL,
             userId INTEGER NOT NULL DEFAULT 0,
             participantRole TEXT NOT NULL DEFAULT 'ATTENDEE',
+            examGrade TEXT NOT NULL DEFAULT '',
+            targetRobloxUsername TEXT NOT NULL DEFAULT '',
             memberGroup TEXT NOT NULL DEFAULT '',
             gradedAttendeeCount INTEGER NOT NULL DEFAULT 0,
             assistedScreens INTEGER NOT NULL DEFAULT 0,
             quotaPoints REAL NOT NULL DEFAULT 0,
-            promotionEventPoints REAL NOT NULL DEFAULT 0,
+            eventPoints REAL NOT NULL DEFAULT 0,
             archiveSynced INTEGER NOT NULL DEFAULT 0,
             createdBy INTEGER NOT NULL DEFAULT 0,
-            createdAt TEXT NOT NULL DEFAULT (datetime('now'))
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
         await db.execute("""
@@ -1399,12 +1402,13 @@ async def initDb():
             robloxUsername TEXT NOT NULL DEFAULT '',
             dutyDate TEXT NOT NULL,
             minutes INTEGER NOT NULL DEFAULT 30,
-            promotionEventPoints REAL NOT NULL DEFAULT 1,
+            eventPoints REAL NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'PENDING',
             reviewerId INTEGER NOT NULL DEFAULT 0,
             reviewNote TEXT NOT NULL DEFAULT '',
             sheetSynced INTEGER NOT NULL DEFAULT 0,
             createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
             reviewedAt TEXT
         );
         """)
@@ -1434,6 +1438,7 @@ async def initDb():
             eventType TEXT NOT NULL,
             eventTitle TEXT NOT NULL DEFAULT '',
             eventDate TEXT NOT NULL DEFAULT '',
+            platoon TEXT NOT NULL DEFAULT '',
             hostId INTEGER NOT NULL DEFAULT 0,
             attendeeCount INTEGER NOT NULL DEFAULT 0,
             archiveSynced INTEGER NOT NULL DEFAULT 0,
@@ -1441,11 +1446,12 @@ async def initDb():
             startedAt TEXT,
             finishedAt TEXT,
             durationMinutes INTEGER NOT NULL DEFAULT 0,
+            metadataJson TEXT NOT NULL DEFAULT '{}',
             createdBy INTEGER NOT NULL DEFAULT 0,
-            createdAt TEXT NOT NULL DEFAULT (datetime('now'))
+            createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+            updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
-        await _executeOptional("ALTER TABLE hg_event_records ADD COLUMN clockinSessionId INTEGER NOT NULL DEFAULT 0")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS reaction_role_entries (
             entryId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1659,7 +1665,6 @@ async def initDb():
             "CREATE INDEX IF NOT EXISTS idx_hg_submissions_target ON hg_submissions(targetUserId, targetRobloxUsername, createdAt)",
             "CREATE INDEX IF NOT EXISTS idx_hg_submission_events_submission ON hg_submission_events(submissionId, createdAt)",
             "CREATE INDEX IF NOT EXISTS idx_hg_point_awards_target ON hg_point_awards(targetUserId, targetRobloxUsername, createdAt)",
-            "CREATE INDEX IF NOT EXISTS idx_hg_attendance_target ON hg_attendance_records(userId, targetRobloxUsername, eventDate)",
             "CREATE INDEX IF NOT EXISTS idx_hg_sentry_user_date ON hg_sentry_logs(userId, dutyDate, status)",
             "CREATE INDEX IF NOT EXISTS idx_hg_quota_cycles_status ON hg_quota_cycles(status, cycleEndDate)",
             "CREATE INDEX IF NOT EXISTS idx_hg_event_records_event ON hg_event_records(guildId, eventDate, eventType)",

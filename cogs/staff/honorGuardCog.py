@@ -5,7 +5,6 @@ import re
 
 from datetime import date, datetime, timezone
 from typing import Optional, Sequence, TypedDict
-from uuid import uuid4
 
 import discord
 from discord import app_commands
@@ -13,7 +12,7 @@ from discord.app_commands import Choice
 from discord.ext import commands
 
 import config
-from cogs.staff.honorGuardViews import HonorGuardEventFinishModal, HonorGuardEventReviewView, HonorGuardEventSubmitView, HonorGuardEventView, HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView, HonorGuardEventManageView
+from cogs.staff.honorGuardViews import HonorGuardEventFinishModal, HonorGuardEventReviewView, HonorGuardEventSubmitView, HonorGuardEventView, HonorGuardGradingView, HonorGuardPointAwardReviewView, HonorGuardSoloSentryReviewView, HonorGuardEventManageView
 from features.staff.clockins.engine import ClockinEngine
 from features.staff.clockins.honorGuardAdapter import HonorGuardAdapter
 from features.staff.honorGuard import buildScaffoldStatus
@@ -332,7 +331,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
         interaction: discord.Interaction,
         awarded_user: discord.Member,
         reason: str,
-        awarded_points: float,
+        awarded_points: int,
     ) -> None:
         if not await self._ensureHonorGuardCommandGuild(interaction):
             return
@@ -354,7 +353,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 "You do not have permission to award Honor Guard points.",
             )
             return
-        if float(awarded_points or 0) <= 0 :
+        if int(awarded_points or 0) <= 0 :
             await self._safeReply(
                 interaction,
                 "Honor Guard point awards cannot be zero or negative.",
@@ -367,7 +366,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             channelId=int(interaction.channel.id),
             submitterId=int(interaction.user.id),
             awardedUserId=int(awarded_user.id),
-            awardedPoints=float(awarded_points or 0),
+            awardedPoints=int(awarded_points or 0),
             reason=str(reason or "").strip(),
             awardedUserDisplayName=self._memberDisplayName(awarded_user),
         )
@@ -415,9 +414,9 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
     async def honorGuardSoloSentry(
         self,
         interaction: discord.Interaction,
-        duty_date: str,
         image: discord.Attachment,
         extra_image: discord.Attachment,
+        duty_date: app_commands.Timestamp = datetime.now(tz=timezone.utc),
     ) -> None:
         if not await self._ensureHonorGuardCommandGuild(interaction):
             return
@@ -436,11 +435,11 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             return
 
         try:
-            normalizedDutyDate = date.fromisoformat(str(duty_date or "").strip()).isoformat()
+            normalizedDutyDate = date.fromtimestamp(duty_date.astimezone(timezone.utc).timestamp()).isoformat()
         except ValueError:
             await self._safeReply(
                 interaction,
-                "Duty date must use the `YYYY-MM-DD` format.",
+                "Duty date must use the @time format.",
             )
             return
 
@@ -526,19 +525,31 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             Choice(name="Training", value="drill"),
             Choice(name="Orientation", value="orientation"),
             Choice(name="Sentry", value="sentry"),
+            Choice(name="Tryout", value="tryout"),
             Choice(name="Inspection", value="inspection"),
             Choice(name="Game Night", value="gamenight"),
             Choice(name="Junior Guardsman Exam", value="jge"),
             Choice(name="Non-Commissioned Officer Exam", value="ncoe"),
         ]
     )
+    @app_commands.choices(
+        platoon=[
+            Choice(name="None", value="none"),
+            Choice(name="Ceremonial", value="cgp"),
+            Choice(name="Cavalry", value="cmp"),
+            Choice(name="Executive", value="egp"),
+        ]
+    )
     @app_commands.rename(event_type="event-type")
+    @app_commands.rename(event_time="event-time")
     @app_commands.rename(event_description="event-description")
     async def honorGuardEventLog(
         self,
         interaction: discord.Interaction,
         event_type : Choice[str],
         event_description: str,
+        event_time: app_commands.Timestamp = datetime.now(tz=timezone.utc),
+        platoon: Choice[str] = None,
         host: Optional[discord.Member] = None,
         supervisors: Optional[str] = None,
         cohosts: Optional[str] = None,
@@ -557,13 +568,13 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 "You do not have permission to create this Honor Guard clock-in.",
             )
             return
-
-        if event_type.value == "jge" or event_type.value == "ncoe":
+        platoonValue = platoon.value if platoon else "none"
+        if platoonValue.upper() != "NONE" and platoonValue.upper() not in getattr(config, "honorGuardActivePlatoons", [""]):
             await self._safeReply(
                 interaction,
-                "Exams arent implement yet"
+                "This platoon is not active for Honor Guard events.",
             )
-            return
+        
 
         if not host:
             host = interaction.user
@@ -576,7 +587,8 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             maxAttendeeLimit=99,
             eventType=event_type.value,
             eventTitle=str(event_description or "").strip(),
-            eventDate=datetime.now().isoformat(timespec="minutes"),
+            eventDate=event_time.astimezone(tz=timezone.utc).replace(tzinfo=None).isoformat(timespec="minutes"),
+            platoon=platoonValue,
         )
         seenUserIds = [host.id]
         hostMemberGroup = _getMemberGroup(host)
@@ -897,13 +909,13 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             return
 
         if type == "QUOTA":
-            points = honorGuardService.HonorGuardPointDeltas(quotaPoints=new_points, promotionEventPoints=attendee.get("eventPoints", 0))
+            points = honorGuardService.HonorGuardPointDeltas(quotaPoints=new_points, eventPoints=attendee.get("eventPoints", 0))
         else:
-            points = honorGuardService.HonorGuardPointDeltas(quotaPoints=attendee.get("quotaPoints", 0), promotionEventPoints=new_points)
+            points = honorGuardService.HonorGuardPointDeltas(quotaPoints=attendee.get("quotaPoints", 0), eventPoints=new_points)
         await interaction.response.defer(ephemeral=True, thinking=False)
         await honorGuardService.updateAttendeePoints(recordId=int(attendee.get("recordId") or 0), points=points)
 
-    async def openTimeModal(self, interaction: discord.Interaction, eventId: int) -> None:
+    async def finishEvent(self, interaction: discord.Interaction, eventId: int) -> None:
         lock = self._eventLocks.setdefault(eventId, asyncio.Lock())
         async with lock:
             event = await self._clockInEngine.getSession(int(eventId))
@@ -927,15 +939,73 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 return
             
             attendees = await self._clockInEngine.listAttendees(int(eventId))
-            if not attendees or len(attendees) == 1: # only Host Record
+            normalAttendees = [attendee for attendee in attendees if attendee.get("participantRole") == "ATTENDEE"]
+            if not normalAttendees or len(normalAttendees) == 0: # only Host Record
                 await self._safeReply(interaction, "No attendees found for this event.")
                 return
-            await interaction.response.send_modal(HonorGuardEventFinishModal(self, event))
-            _saveRecord(interaction, interaction.user, int(eventId), "SUBMIT")
-            await self._clockInEngine.updateSessionStatus(int(eventId), "FINISHED")
+            
+            if event.get("eventType") in ["jge", "ncoe"]:
+                embed = honorGuardRendering.buildHonorGuardGradingEmbed(event, interaction.user.id, normalAttendees, 0)
+                await self._safeReply(interaction, embed=embed, view=HonorGuardGradingView(self, eventId, interaction.user.id, normalAttendees))
+                _saveRecord(interaction, interaction.user, int(eventId), "SUBMIT")
+                await self._clockInEngine.updateSessionStatus(int(eventId), "GRADING")
+                return
+            else:
+                await interaction.response.send_modal(HonorGuardEventFinishModal(self, event))
+                _saveRecord(interaction, interaction.user, int(eventId), "SUBMIT")
+                await self._clockInEngine.updateSessionStatus(int(eventId), "FINISHED")
+
             await self._updateEventMessage(eventId)
 
+    async def finishGrading(self, interaction: discord.Interaction, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            await self._safeReply(interaction, "This event session no longer exists.")
+            return
+        if str(event.get("status") or "").upper() != "GRADING":
+            await self._safeReply(interaction, "This event is not in grading status.")
+            return
+        record = _checkRecordByEventId(eventId, "SUBMIT")
+        if not record:
+            await self._safeReply(interaction, "No grading submission found.")
+            return
+        if record.get("user").id != interaction.user.id:
+            await self._safeReply(interaction, f"Wrong grading submission found.")
+            return
+
+        _deleteRecord(eventId, "SUBMIT")
+
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+        normalAttendees = [attendee for attendee in attendees if attendee.get("participantRole") == "ATTENDEE"]
+        for attendee in attendees:
+            points = honorGuardService.calculatePointDeltas(configModule=config, memberGroup=attendee.get("memberGroup"), eventType=event.get("eventType"), participantRole=attendee.get("participantRole"), attendeeCount=len(normalAttendees), durationMinutes=0, passed=attendee.get("examGrade", "") == "PASS")
+            await honorGuardService.updateAttendeePoints(recordId=int(attendee.get("recordId")), points=points)
+
+        attendees = await self._clockInEngine.listAttendees(int(eventId))
+
+        _saveRecord(interaction, interaction.user, int(eventId), "SUBMIT2")
+        enbed = self._clockInAdapter.buildSubmitEmbed(event, attendees)
+        view = HonorGuardEventSubmitView(self, interaction.user.id, eventId, interaction.guild.id, attendees)
+        await interactionRuntime.safeInteractionReply(
+            interaction,
+            embed=enbed,
+            view=view,
+            ephemeral=True,
+        )
+        await self._clockInEngine.updateSessionStatus(int(eventId), "FINISHED")
+        await self._updateEventMessage(eventId)
+
     async def timeoutTimeModal(self, eventId: int) -> None:
+        event = await self._clockInEngine.getSession(int(eventId))
+        if not event:
+            return
+        record = _getRecordByEventId(eventId, "SUBMIT")
+        if record:
+            await self._clockInEngine.updateSessionStatus(int(eventId), "OPEN")
+            await self._updateEventMessage(eventId)
+            _deleteRecord(eventId, "SUBMIT")
+
+    async def timeoutGradingView(self, eventId: int) -> None:
         event = await self._clockInEngine.getSession(int(eventId))
         if not event:
             return
@@ -948,6 +1018,7 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
             await self._clockInEngine.updateSessionStatus(int(eventId), "OPEN")
             await self._updateEventMessage(eventId)
             _deleteRecord(eventId, "SUBMIT")
+
 
     async def openSubmitEvent(self, interaction: discord.Interaction, eventId: int, durationMinutes: int) -> None:
         lock = self._eventLocks.setdefault(eventId, asyncio.Lock())
@@ -1052,7 +1123,6 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                 evidenceChannel = interaction.channel
 
             await self._safeReply(interaction, f"Upload two event screenshots in <#{evidenceChannel.id}> within 3 minutes.")
-            
             # We reuse the evidence collector so solo/group flows behave the same.
             evidenceMessage = await self._collectTwoImageEvidenceMessage(
                 channel=evidenceChannel,
@@ -1064,13 +1134,14 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                     ephemeral=True,
                 )
                 return
-            imageUrls = _evidenceLinks(evidenceMessage.attachments)
+            imageUrls = []
             imageFiles: list[discord.File] = []
             for attachment in evidenceMessage.attachments:
                 if not _isImageAttachment(attachment):
                     continue
                 try:
                     imageFiles.append(await attachment.to_file())
+                    imageUrls.append(attachment.url)
                 except (discord.HTTPException, OSError):
                     continue
             if len(imageFiles) < 2:
@@ -1079,7 +1150,6 @@ class HonorGuardCog(runtimeCogGuards.InteractionGuardMixin, commands.Cog):
                     ephemeral=True,
                 )
                 return
-            #await evidenceMessage.delete()
             submissionId = await honorGuardService.createEventSubmission(
                 eventId=int(eventId),
                 event=event,

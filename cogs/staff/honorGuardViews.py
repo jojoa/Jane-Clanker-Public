@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from typing import Optional
 
@@ -11,6 +11,7 @@ import config
 from features.staff.honorGuard import outputs as honorGuardOutputs
 from features.staff.honorGuard import rendering as honorGuardRendering
 from features.staff.honorGuard import service as honorGuardService
+from features.staff.honorGuard.sheets import HonorGuardEventHostUpdate
 from runtime import interaction as interactionRuntime
 from runtime import permissions as runtimePermissions
 from runtime import viewBases as runtimeViewBases
@@ -107,7 +108,7 @@ class HonorGuardPointAwardReviewView(discord.ui.View):
         )
 
     async def _syncApprovedSubmission(self) -> dict:
-        return await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId)
+        return await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId, configModule=config)
 
     async def _logHonorGuardSheetChange(
         self,
@@ -187,7 +188,7 @@ class HonorGuardPointAwardReviewView(discord.ui.View):
                     syncResult = await self._syncApprovedSubmission()
                     submission = await self._getSubmission()
                     if submission:
-                        awardedPoints = submission.get("promotionAwardedPoints") or 0
+                        awardedPoints = submission.get("awardedPoints") or 0
                         syncStatusText = "already synced" if syncResult.get("alreadySynced") else "synced now"
                         requestedBy = f"<@{int(submission.get('submitterId') or 0)}>"
                         requestMessageUrl = str(getattr(interaction.message, "jump_url", "") or "")
@@ -293,7 +294,7 @@ class HonorGuardSoloSentryReviewView(discord.ui.View):
         )
 
     async def _syncApprovedSubmission(self) -> dict:
-        return await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId)
+        return await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId, configModule=config)
 
     async def _logHonorGuardSheetChange(
         self,
@@ -384,7 +385,7 @@ class HonorGuardSoloSentryReviewView(discord.ui.View):
                             details=(
                                 f"User: <@{int(submission.get('targetUserId') or 0)}> | "
                                 f"Date: {submission.get('eventDate') or 'N/A'} | "
-                                f"Points +{submission.get('promotionEventPoints') or 0} EP, "
+                                f"Points +{submission.get('eventPoints') or 0} EP, "
                                 f"+{submission.get('quotaPoints') or 0} QP | "
                                 f"Sheet: {syncStatusText}"
                             ),
@@ -491,9 +492,9 @@ class HonorGuardEventReviewView(discord.ui.View):
         )
 
     async def _syncApprovedSubmission(self, eventId: int) -> dict:
-        result = await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId)
+        result = await honorGuardService.syncApprovedSubmissionToSheet(self.submissionId, configModule=config)
         hostUpdate = await honorGuardService.syncEventRecordToSheets(eventId)
-        return {**result, "eventHostUpdate": hostUpdate.get("eventHostUpdate") != None, "archiveSynced": hostUpdate.get("archiveSynced")}
+        return {**result, "eventHostUpdate": hostUpdate.get("eventHostUpdate"), "archiveSynced": hostUpdate.get("archiveSynced")}
 
     async def _logHonorGuardSheetChange(
         self,
@@ -503,6 +504,7 @@ class HonorGuardEventReviewView(discord.ui.View):
         requestMessageUrl: str,
         change: str,
         details: str,
+        auditLogs: list[str],
     ) -> None:
         await honorGuardOutputs.sendHonorGuardSheetChangeLog(
             self.cog.bot,
@@ -511,6 +513,15 @@ class HonorGuardEventReviewView(discord.ui.View):
             requestMessageUrl=requestMessageUrl,
             change=change,
             details=details,
+        )
+        await honorGuardOutputs.sendHonorGuardSheetAudit(
+            self.cog.bot,
+            reviewerId=reviewerId,
+            requestedBy=requestedBy,
+            requestMessageUrl=requestMessageUrl,
+            change=change,
+            details=details,
+            auditLogs=auditLogs,
         )
 
     async def _buildSubmissionEmbed(self) -> Optional[discord.Embed]:
@@ -576,6 +587,7 @@ class HonorGuardEventReviewView(discord.ui.View):
                 )
 
                 if status == "APPROVED":
+                    event = await self._getEvent(int(submission.get("eventId") or 0))
                     syncResult = await self._syncApprovedSubmission(submission.get("eventId") or 0)
                     submission = await self._getSubmission()
                     allAttendees = await self._getAllAttendees(int(submission.get("eventId") or 0))
@@ -583,20 +595,27 @@ class HonorGuardEventReviewView(discord.ui.View):
                         syncStatusText = "already synced" if syncResult.get("alreadySynced") else "synced now"
                         requestedBy = f"<@{int(submission.get('submitterId') or 0)}>"
                         requestMessageUrl = str(getattr(interaction.message, "jump_url", "") or "")
+                        eventHostUpdate: HonorGuardEventHostUpdate = syncResult.get("eventHostUpdate")
+                        auditLogs = syncResult.get("auditLogs") or []
+                        auditLogs.append("")
+                        auditLogs.append(f"Host: <@{int(submission.get('targetUserId') or 0)}> ({eventHostUpdate.host}) {eventHostUpdate.previousValue} -> {eventHostUpdate.value} hosted Events")
                         await self._logHonorGuardSheetChange(
                             reviewerId=interaction.user.id,
                             requestedBy=requestedBy,
                             requestMessageUrl=requestMessageUrl,
                             change="Edited Honor Guard points for an approved event submission.",
+                            auditLogs=auditLogs,
                             details=(
                                 f"Host: <@{int(submission.get('targetUserId') or 0)}> | "
+                                f"Type: {event.get('eventType') or 'N/A'} | "
                                 f"Participants: {len(allAttendees)-1} | "
                                 f"Date: {submission.get('eventDate') or 'N/A'} | "
                                 f"Archived: {syncResult.get('archiveSynced') or False} | "
-                                f"Host Update: {syncResult.get('eventHostUpdate') or False} | "
+                                f"Host Update: {(syncResult.get('eventHostUpdate') != None) or False} | "
                                 f"Sheet: {syncStatusText}"
                             ),
                         )
+
 
                 _setAllButtonsDisabled(self, True)
 
@@ -682,10 +701,7 @@ class HonorGuardEventView(discord.ui.View):
         custom_id="honorguard_event:finish",
     )
     async def finishBtn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        #event = await self.cog._clockInEngine.getSession(self.eventId)
-        #await interaction.response.send_modal(HonorGuardEventFinishModal(self.cog, event))
-        await self.cog.openTimeModal(interaction, self.eventId)
-        #await self.cog.openSubmitEvent(interaction, self.eventId, 60)
+        await self.cog.finishEvent(interaction, self.eventId)
 
     @discord.ui.button(
         style=discord.ButtonStyle.success,
@@ -838,7 +854,7 @@ class HonorGuardEventPointsModal(discord.ui.Modal, title="Edit Points"):
         if(type == "QUOTA"):
             self.pointsInput.default = str(user.get("quotaPoints", 0))
         else:
-            self.pointsInput.default = str(user.get("promotionEventPoints", 0))
+            self.pointsInput.default = str(user.get("eventPoints", 0))
         self.type = type
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -860,7 +876,6 @@ class HonorGuardEventPointsModal(discord.ui.Modal, title="Edit Points"):
         await self.view.updateMessage(self.original_interaction)
 
 class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
-    # NOT AT USE ANYMORE
     durationMinutesInput = discord.ui.TextInput(
         label="Event duration (minutes)",
         style=discord.TextStyle.short,
@@ -874,13 +889,14 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
         self.cog = cog
         self.eventId = int(event.get("eventId"))
         startedAt: datetime = event.get("startedAt")
-        finishedAt = datetime.now()
+        finishedAt = datetime.now(tz=timezone.utc)
         duration = finishedAt - startedAt
         minutes = int(duration.total_seconds() // 60)
         self.durationMinutesInput.default = str(minutes)
         self.durationMinutesInput.placeholder = f"Default: {minutes}"
 
     async def on_timeout(self) -> None:
+        await self.stop()
         await self.cog.timeoutTimeModal(self.eventId)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -1049,3 +1065,54 @@ class HonorGuardEventManageView(runtimeViewBases.OwnerLockedView):
     )
     async def doneBtn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.cog.closeEventManage(self.eventId)
+
+class HonorGuardGradingView(runtimeViewBases.OwnerLockedView):
+    def __init__(self, cog: HonorGuardCog, sessionId: int, hostId: int, attendees: list[dict]):
+        super().__init__(openerId=hostId, timeout=900)
+        self.cog = cog
+        self.eventId = sessionId
+        self.hostId = hostId
+        self.attendees = attendees
+        self.gradingIndex = 0
+
+        self.passBtn.custom_id = f"grading:pass:{sessionId}"
+        self.failBtn.custom_id = f"grading:fail:{sessionId}"
+        self.continueBtn.custom_id = f"grading:continue:{sessionId}"
+
+    async def on_timeout(self) -> None:
+        await self.cog.timeoutGradingView(self.eventId)
+
+
+    async def applyGrade(self, interaction: discord.Interaction, grade: str):
+        await _safeInteractionDefer(interaction, ephemeral=True)
+
+        if self.gradingIndex >= len(self.attendees):
+            self.gradingIndex = 0
+            await self.updateMessage(interaction)
+            return 
+
+        userId = self.attendees[self.gradingIndex]["userId"]
+        await honorGuardService.setExamGrade(self.eventId, userId, grade)
+
+        self.gradingIndex += 1
+        await self.updateMessage(interaction)
+        
+       
+    async def updateMessage(self, interaction: discord.Interaction):
+        session = await self.cog._clockInEngine.getSession(self.eventId)
+        allAttendees = await self.cog._clockInEngine.listAttendees(self.eventId)
+        self.attendees = [a for a in allAttendees if a.get("participantRole", "").upper() == "ATTENDEE"]
+        embed = honorGuardRendering.buildHonorGuardGradingEmbed(session, self.hostId, self.attendees, self.gradingIndex)
+        await runtimeViewBases.safeRefreshInteractionMessage(interaction, embed=embed, view=self)
+    
+    @discord.ui.button(label="Pass", style=discord.ButtonStyle.success, emoji="\u2705")
+    async def passBtn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.applyGrade(interaction, "PASS")
+
+    @discord.ui.button(label="Fail", style=discord.ButtonStyle.danger, emoji="\u274C")
+    async def failBtn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.applyGrade(interaction, "FAIL")
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary, emoji="\u27A1")
+    async def continueBtn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.finishGrading(interaction, self.eventId)

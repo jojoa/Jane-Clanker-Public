@@ -355,9 +355,10 @@ multiOrbatSheets = [
             },
             "pointColumns": {
                 "quota": honorGuardQuotaPointsColumn,
-                "promotionEvent": honorGuardPromotionEventPointsColumn,
-                "promotionAwarded": honorGuardPromotionAwardedPointsColumn,
-                "promotionTotal": honorGuardPromotionTotalPointsColumn,
+                "event": honorGuardEventPointsColumn,
+                "platoon": honorGuardTotalPlatoonPointsColumn,
+                "awarded": honorGuardAwardedPointsColumn,
+                "total": honorGuardTotalPointsColumn,
             },
             "profileColumns": {
                 "rank": honorGuardRankColumn,
@@ -365,6 +366,18 @@ multiOrbatSheets = [
                 "quotaStatus": honorGuardQuotaCompleteFormulaColumn,
             },
         },
+        "organization": {
+            "enabled": honorGuardEnabled,
+            "supportsSectionHeaders": True,
+        },
+    },
+    {
+        "key": "honorGuard_platoon_cmp",
+        "displayName": "Honor Guard Cavalry Platoon ORBAT",
+        "spreadsheetId": honorGuardSpreadsheetId,
+        "sheetName": honorGuardCMPSheetName,
+        "credentialsPathEnvVar": honorGuardCredentialsPathEnvVar,
+        "credentialsPathConfigKey": honorGuardCredentialsPathConfigKey,
         "organization": {
             "enabled": honorGuardEnabled,
             "supportsSectionHeaders": True,

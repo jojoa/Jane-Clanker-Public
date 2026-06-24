@@ -21,9 +21,10 @@ class HonorGuardMemberColumns:
     rank: str
     activityStatus: str
     quotaPoints: str
-    promotionEventPoints: str
-    promotionAwardedPoints: str
-    promotionTotalPoints: str
+    eventPoints: str
+    platoonPoints: str
+    awardedPoints: str
+    totalPoints: str
     juniorExamPassed: str
     ncoExamPassed: str
 
@@ -36,9 +37,10 @@ class HonorGuardMemberRow:
     rank: str
     activityStatus: str
     quotaPoints: float
-    promotionEventPoints: float
-    promotionAwardedPoints: float
-    promotionTotalPoints: float
+    eventPoints: float
+    platoonPoints: float
+    awardedPoints: float
+    totalPoints: float
     juniorExamPassed: str
     ncoExamPassed: str
 
@@ -49,14 +51,24 @@ class HonorGuardMemberPointUpdate:
     robloxUsername: str
     previousQuotaPoints: float
     quotaPoints: float
-    previousPromotionEventPoints: float
-    promotionEventPoints: float
-    previousPromotionAwardedPoints: float
-    promotionAwardedPoints: float
-    previousPromotionTotalPoints: float
-    promotionTotalPoints: float
+    previousEventPoints: float
+    eventPoints: float
+    previousPlatoonPoints: float
+    platoonPoints: float
+    previousAwardedPoints: float
+    awardedPoints: float
+    previousTotalPoints: float
+    totalPoints: float
     activityStatus: str
+    passedJGE: bool
+    passedNCOE: bool
 
+@dataclass(slots=True, frozen=True)
+class HonorGuardMemberPlatoonUpdate:
+    row: int
+    robloxUsername: str
+    previousEventPoints: float
+    eventPoints: float
 
 @dataclass(slots=True, frozen=True)
 class HonorGuardArchiveRecord:
@@ -164,9 +176,10 @@ def loadMemberColumns(*, configModule: Any = config) -> HonorGuardMemberColumns:
         rank=_normalizeColumn(getattr(configModule, "honorGuardRankColumn", "C")),
         activityStatus=_normalizeColumn(getattr(configModule, "honorGuardActivityStatusColumn", "D")),
         quotaPoints=_normalizeColumn(getattr(configModule, "honorGuardQuotaPointsColumn", "E")),
-        promotionEventPoints=_normalizeColumn(getattr(configModule, "honorGuardPromotionEventPointsColumn", "F")),
-        promotionAwardedPoints=_normalizeColumn(getattr(configModule, "honorGuardPromotionAwardedPointsColumn", "G")),
-        promotionTotalPoints=_normalizeColumn(getattr(configModule, "honorGuardPromotionTotalPointsColumn", "H")),
+        eventPoints=_normalizeColumn(getattr(configModule, "honorGuardEventPointsColumn", "F")),
+        platoonPoints=_normalizeColumn(getattr(configModule, "honorGuardTotalPlatoonPointsColumn", "G")),
+        awardedPoints=_normalizeColumn(getattr(configModule, "honorGuardAwardedPointsColumn", "H")),
+        totalPoints=_normalizeColumn(getattr(configModule, "honorGuardTotalPointsColumn", "M")),
         juniorExamPassed=_normalizeColumn(getattr(configModule, "honorGuardJuniorExamPassedColumn", "J")),
         ncoExamPassed=_normalizeColumn(getattr(configModule, "honorGuardNcoExamPassedColumn", "K")),
     )
@@ -179,9 +192,10 @@ def _columnMap(columns: HonorGuardMemberColumns) -> dict[str, str]:
         "rank": columns.rank,
         "activityStatus": columns.activityStatus,
         "quotaPoints": columns.quotaPoints,
-        "promotionEventPoints": columns.promotionEventPoints,
-        "promotionAwardedPoints": columns.promotionAwardedPoints,
-        "promotionTotalPoints": columns.promotionTotalPoints,
+        "eventPoints": columns.eventPoints,
+        "platoonPoints": columns.platoonPoints,
+        "awardedPoints": columns.awardedPoints,
+        "totalPoints": columns.totalPoints,
         "juniorExamPassed": columns.juniorExamPassed,
         "ncoExamPassed": columns.ncoExamPassed,
     }
@@ -235,6 +249,17 @@ def findMemberRow(
         )
     return None
 
+def findPlatoonRow(robloxUsername: str, sheetKey: str, configModule: Any = config) -> Optional[int]:
+    usernameColumn = _normalizeColumn(getattr(configModule, "honorGuardPlatoonUsernameColumn", "A"))
+    if not usernameColumn:
+        return None
+    return _findRowByNormalizedValue(
+        sheetKey,
+        columnLetter=usernameColumn,
+        value=robloxUsername,
+        normalizer=_normalizeUsername,
+    )
+
 
 def readMember(
     *,
@@ -260,9 +285,10 @@ def readMember(
         row=rowIndex,
         columnMap=_columnMap(columns),
     )
-    promotionEvent = _toFloat(values.get("promotionEventPoints"))
-    promotionAwarded = _toFloat(values.get("promotionAwardedPoints"))
-    promotionTotal = _toFloat(values.get("promotionTotalPoints"), promotionEvent + promotionAwarded)
+    event = _toFloat(values.get("eventPoints"))
+    platoon = _toFloat(values.get("platoonPoints"))
+    awarded = _toFloat(values.get("awardedPoints"))
+    total = _toFloat(values.get("totalPoints"), event + platoon + awarded)
     return HonorGuardMemberRow(
         row=rowIndex,
         discordId=_toInt(values.get("discordId")),
@@ -270,13 +296,13 @@ def readMember(
         rank=str(values.get("rank") or "").strip(),
         activityStatus=str(values.get("activityStatus") or "").strip(),
         quotaPoints=_toFloat(values.get("quotaPoints")),
-        promotionEventPoints=promotionEvent,
-        promotionAwardedPoints=promotionAwarded,
-        promotionTotalPoints=promotionTotal,
+        eventPoints=event,
+        platoonPoints=platoon,
+        awardedPoints=awarded,
+        totalPoints=total,
         juniorExamPassed=str(values.get("juniorExamPassed") or "").strip(),
         ncoExamPassed=str(values.get("ncoExamPassed") or "").strip(),
     )
-
 
 def _isExcuseStatus(value: object, *, configModule: Any = config) -> bool:
     statusKey = _normalizeKey(value)
@@ -285,14 +311,17 @@ def _isExcuseStatus(value: object, *, configModule: Any = config) -> bool:
     configured = getattr(configModule, "honorGuardExcuseStatusValues", []) or []
     return statusKey in {_normalizeKey(item) for item in configured}
 
-
 def applyMemberPointDeltas(
     *,
     discordId: int = 0,
     robloxUsername: str = "",
     quotaDelta: float = 0,
-    promotionEventDelta: float = 0,
-    promotionAwardedDelta: float = 0,
+    eventDelta: float = 0,
+    platoonDelta: float = 0,
+    awardedDelta: float = 0,
+    passedJGE: bool = False,
+    passedNCOE: bool = False,
+    promoteWhenEligible: bool = True,
     markActiveWhenEarlyQuotaMet: bool = True,
     configModule: Any = config,
 ) -> HonorGuardMemberPointUpdate:
@@ -303,9 +332,10 @@ def applyMemberPointDeltas(
 
     columns = loadMemberColumns(configModule=configModule)
     nextQuota = max(0.0, float(member.quotaPoints) + float(quotaDelta or 0))
-    nextPromotionEvent = max(0.0, float(member.promotionEventPoints) + float(promotionEventDelta or 0))
-    nextPromotionAwarded = max(0.0, float(member.promotionAwardedPoints) + float(promotionAwardedDelta or 0))
-    nextPromotionTotal = nextPromotionEvent + nextPromotionAwarded
+    nextEvent = max(0.0, float(member.eventPoints) + float(eventDelta or 0))
+    nextPlatoon = max(0.0, float(member.platoonPoints) + float(platoonDelta or 0))
+    nextAwarded = max(0.0, float(member.awardedPoints) + float(awardedDelta or 0))
+    nextTotal = nextEvent + nextPlatoon + nextAwarded
 
     status = member.activityStatus
     earlyQuota = float(getattr(configModule, "honorGuardEarlyActiveQuotaPoints", 8) or 8)
@@ -320,14 +350,20 @@ def applyMemberPointDeltas(
     updates: dict[str, tuple[str, Any]] = {}
     if columns.quotaPoints:
         updates["quotaPoints"] = (columns.quotaPoints, _pointValue(nextQuota))
-    if columns.promotionEventPoints:
-        updates["promotionEventPoints"] = (columns.promotionEventPoints, _pointValue(nextPromotionEvent))
-    if columns.promotionAwardedPoints:
-        updates["promotionAwardedPoints"] = (columns.promotionAwardedPoints, _pointValue(nextPromotionAwarded))
-    if columns.promotionTotalPoints:
-        updates["promotionTotalPoints"] = (columns.promotionTotalPoints, _pointValue(nextPromotionTotal))
+    if columns.eventPoints:
+        updates["eventPoints"] = (columns.eventPoints, _pointValue(nextEvent))
+    if columns.platoonPoints:
+        updates["platoonPoints"] = (columns.platoonPoints, _pointValue(nextPlatoon))
+    if columns.awardedPoints:
+        updates["awardedPoints"] = (columns.awardedPoints, _pointValue(nextAwarded))
+    if columns.totalPoints:
+        updates["totalPoints"] = (columns.totalPoints, _pointValue(nextTotal))
     if columns.activityStatus and status != member.activityStatus:
         updates["activityStatus"] = (columns.activityStatus, status)
+    if columns.juniorExamPassed and passedJGE and str(member.juniorExamPassed).strip().lower() != True:
+        updates["juniorExamPassed"] = (columns.juniorExamPassed, True)
+    if columns.ncoExamPassed and passedNCOE and str(member.ncoExamPassed).strip().lower() != True:
+        updates["ncoExamPassed"] = (columns.ncoExamPassed, True)
 
     _engine.writeRowColumns(_memberSheetKey, row=member.row, columnValues=updates)
     return HonorGuardMemberPointUpdate(
@@ -335,15 +371,53 @@ def applyMemberPointDeltas(
         robloxUsername=member.robloxUsername,
         previousQuotaPoints=member.quotaPoints,
         quotaPoints=nextQuota,
-        previousPromotionEventPoints=member.promotionEventPoints,
-        promotionEventPoints=nextPromotionEvent,
-        previousPromotionAwardedPoints=member.promotionAwardedPoints,
-        promotionAwardedPoints=nextPromotionAwarded,
-        previousPromotionTotalPoints=member.promotionTotalPoints,
-        promotionTotalPoints=nextPromotionTotal,
+        previousEventPoints=member.eventPoints,
+        eventPoints=nextEvent,
+        previousPlatoonPoints=member.platoonPoints,
+        platoonPoints=nextPlatoon,
+        previousAwardedPoints=member.awardedPoints,
+        awardedPoints=nextAwarded,
+        previousTotalPoints=member.totalPoints,
+        totalPoints=nextTotal,
         activityStatus=status,
+        passedJGE=passedJGE and str(member.juniorExamPassed).strip().lower() != True,
+        passedNCOE=passedNCOE and str(member.ncoExamPassed).strip().lower() != True,
     )
 
+def applyMemberPlatoonPoints(
+    *,
+    platoon: str,
+    discordId: int = 0,
+    robloxUsername: str = "",
+    eventDelta: float = 0,
+    configModule: Any = config,
+) -> HonorGuardMemberPlatoonUpdate:
+    sheetKey = f"honorGuard_platoon_{_normalizeKey(platoon)}"
+    row = findPlatoonRow(robloxUsername, sheetKey, configModule=configModule )
+    column = _normalizeColumn(getattr(configModule, "honorGuardPlatoonPointsColumn", "D"))
+    if row is None:
+        return HonorGuardMemberPlatoonUpdate(
+            row=0,
+            robloxUsername=robloxUsername,
+            previousEventPoints=0,
+            eventPoints=0,
+        )
+
+    rangeA1 = f"{_sheetName(sheetKey)}!{column}{row}:{column}{row}"
+    values = _engine.getValues(sheetKey, rangeA1)
+    previousValue = _toInt(values[0][0] if values and values[0] else 0)
+    nextValue = max(0, previousValue + int(eventDelta or 0))
+    _engine.writeRowColumns(
+        sheetKey,
+        row=row,
+        columnValues={"platoonPoints": (column, nextValue)},
+    )
+    return HonorGuardMemberPlatoonUpdate(
+        row=row,
+        robloxUsername=robloxUsername,
+        previousEventPoints=previousValue,
+        eventPoints=nextValue,
+    )
 
 def archiveEvent(record: HonorGuardArchiveRecord, *, configModule: Any = config) -> dict[str, Any]:
     columns = list(getattr(configModule, "honorGuardArchiveColumns", []) or [])
