@@ -176,6 +176,15 @@ honorGuardEventHostsSheetName = "Event Hosts"
 honorGuardCredentialsPathEnvVar = "ORBAT_GOOGLE_CREDENTIALS_PATH"
 honorGuardCredentialsPathConfigKey = "orbatGoogleCredentialsPath"
 
+# Honor Guard ORBAT section headers
+honorGuardMemberSectionHeaders = [
+    "IGB",
+    "CO",
+    "NCO",
+    "Guardsman",
+    "RETIRED",
+]
+
 # Honor Guard member sheet columns.
 honorGuardDiscordIdColumn = ""
 honorGuardRobloxUsernameColumn = "A"
@@ -227,6 +236,19 @@ honorGuardEventHostEventTypeColumns = {
 honorGuardEnlistedRoleIds = []
 honorGuardNcoRoleIds = []
 honorGuardOfficerRoleIds = []
+honotGuardAllowedRanks = [
+    "Commandant",
+    "Deputy Commandant",
+    "Oversight",
+    "Inspector General",
+    "Board Advisor",
+    "Parade Marshal",
+    "Parade Officer",
+    "Platoon Sergeant",
+    "Senior Guardsman",
+    "Guardsman",
+    "Junior Guardsman",
+]
 
 honorGuardExcuseStatusValues = [
     "Excused",

@@ -1166,20 +1166,29 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
         )
     else:
         eventId = int(_jsonDict(submission.get("metadataJson")).get("eventRecordId"))
-        ## Maybe in the future also use a batch writer
-        for attendanceRecord in await listHonorGuardAttendees(eventId):
+        ## Maybe in the future also use a batch writer¨
+
+        attendees = await listHonorGuardAttendees(eventId)
+        updates: list[dict] = []
+        
+
+        for record in attendees:
             lookup = await robloxUsers.fetchRobloxUser(
-                int(attendanceRecord.get("userId") or 0),
-                int(submission.get("guildId") or 0)
+                int(record.get("userId") or 0),
+                int(submission.get("guildId") or 0),
             )
-            targetRobloxUsername = str(lookup.robloxUsername or "").strip()
-            updateResult = honorGuardSheets.applyMemberPointDeltas(
-                discordId=int(attendanceRecord.get("userId") or 0),
-                robloxUsername=targetRobloxUsername,
-                quotaDelta=attendanceRecord.get("quotaPoints") or 0,
-                promotionEventDelta=attendanceRecord.get("promotionEventPoints") or 0,
-            )
+
+            updates.append({
+                "robloxUsername": str(lookup.robloxUsername or "").strip(),
+                "quotaPointsDelta": record.get("quotaPoints", 0),
+                "promotionEventDelta": record.get("promotionEventPoints", 0),
+             #  "promotionAwardedDelta": record.get("promotionAwardedPoints"),
+             #  "juniorExamPassed": str(record.get("juniorExamPassed") or None),
+             #  "ncoExamPassed": record.get("ncoExamPassed" or None),
+            })
             count += 1
+
+        updateResult = honorGuardSheets.applyApprovedLogsBatch(updates=updates)
 
     await execute(
         """

@@ -456,6 +456,31 @@ class MultiOrbatEngine:
             )
         self.batchUpdateValues(sheetKey, updates)
 
+    def writeRowsColumnsBatch(
+            self,
+            sheetKey: str,
+            *,
+            rows: list[int],
+            columnValuesByRow: dict[int, dict[str, tuple[str, Any]]],
+    ) -> None:
+        updates: list[dict[str, Any]] = []
+        sheetName = self.getSheetName(sheetKey)
+        for row in rows:
+            columnValues = columnValuesByRow.get(row, {})
+            for _, payload in columnValues.items():
+                if not isinstance(payload, tuple) or len(payload) != 2:
+                    continue
+                col, rawValue = payload
+                if not col:
+                    continue
+                updates.append(
+                    {
+                        "range": f"{sheetName}!{col}{row}:{col}{row}",
+                        "values": [[rawValue]],
+                    }
+                )
+        self.batchUpdateValues(sheetKey, updates)
+
     def incrementIntCell(self, sheetKey: str, *, row: int, columnLetter: str, delta: int = 1) -> int:
         sheetName = self.getSheetName(sheetKey)
         rangeA1 = f"{sheetName}!{columnLetter}{row}:{columnLetter}{row}"
