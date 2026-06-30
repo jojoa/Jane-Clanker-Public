@@ -86,6 +86,7 @@ class HonorGuardEventHostUpdate:
 
 @dataclass(slots=True)
 class HonorGuardMemberColumnsBatch:
+    discordId: int
     robloxUsername: str
     rank: str
     quotaPoints: float
@@ -110,6 +111,7 @@ class ApprovedLogUpdate:
 @dataclass(slots=True)
 class HonorGuardMemberRowBatch:
     row: int
+    discordId: int
     robloxUsername: str
     rank: str
     quotaPoints: float

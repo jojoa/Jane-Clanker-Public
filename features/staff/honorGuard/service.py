@@ -479,7 +479,7 @@ async def createSubmission(
             (
                 guildId, channelId, submitterId, targetUserId,
                 targetDisplayName, submissionType, eventDate,
-                quotaPoints, promotionEventPoints, promotionAwardedPoints,
+                quotaPoints, eventPoints, awardedPoints,
                 metadataJson
             )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -725,7 +725,7 @@ async def updateAttendeePoints(
     await execute(
         """
         UPDATE hg_attendance_records
-        SET quotaPoints = ?, promotionEventPoints = ?
+        SET quotaPoints = ?, eventPoints = ?
         WHERE recordId = ?
         """,
         (
@@ -751,7 +751,7 @@ async def createSoloSentryLog(
         INSERT INTO hg_sentry_logs
             (
                 submissionId, guildId, userId, dutyDate, minutes,
-                promotionEventPoints, status
+                eventPoints, status
             )
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
@@ -1166,7 +1166,7 @@ async def syncApprovedSubmissionToSheet(submissionId: int) -> dict[str, Any]:
         )
     else:
         eventId = int(_jsonDict(submission.get("metadataJson")).get("eventRecordId"))
-        ## Maybe in the future also use a batch writer¨
+        ## Maybe in the future also use a batch writer
 
         attendees = await listHonorGuardAttendees(eventId)
         updates: list[dict] = []
