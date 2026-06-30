@@ -162,6 +162,7 @@ johnEventLogChannelId = 0
 johnClankerBotId = 0
 
 honorGuardEnabled = False
+honorGuardActivePlatoons = []
 honorGuardCommandGuildIds = []
 honorGuardReviewChannelId = 0
 honorGuardLogChannelId = 0
@@ -171,6 +172,7 @@ honorGuardSpreadsheetId = _envText(
     "1aLD68JNA2nRjTxG1c3DZOtb_DPRXE4uNKN7ZxpKo_0k",
 )
 honorGuardMemberSheetName = "Main"
+honorGuardCMPSheetName = "Cavalry"
 honorGuardArchiveSheetName = "Event Archive"
 honorGuardEventHostsSheetName = "Event Hosts"
 honorGuardCredentialsPathEnvVar = "ORBAT_GOOGLE_CREDENTIALS_PATH"
@@ -189,16 +191,17 @@ honorGuardMemberSectionHeaders = [
 honorGuardDiscordIdColumn = ""
 honorGuardRobloxUsernameColumn = "A"
 honorGuardRankColumn = "B"
-honorGuardActivityStatusColumn = "H"
+honorGuardActivityStatusColumn = "G"
 honorGuardQuotaPointsColumn = "E"
-honorGuardPromotionEventPointsColumn = "K"
-honorGuardPromotionAwardedPointsColumn = "L"
-honorGuardPromotionTotalPointsColumn = ""
-honorGuardJuniorExamPassedColumn = "O"
-honorGuardNcoExamPassedColumn = "P"
-honorGuardQuotaCompleteFormulaColumn = "G"
-honorGuardPromotionEligibleFormulaColumn = "Q"
-honorGuardStrikesColumn = "R"
+honorGuardEventPointsColumn = "J"
+honorGuardTotalPlatoonPointsColumn = "L"
+honorGuardAwardedPointsColumn = "K"
+honorGuardTotalPointsColumn = "M"
+honorGuardJuniorExamPassedColumn = "N"
+honorGuardNcoExamPassedColumn = "O"
+honorGuardQuotaCompleteFormulaColumn = "F"
+honorGuardPromotionEligibleFormulaColumn = "P"
+honorGuardStrikesColumn = "Q"
 
 # Honor Guard schedule/archive sheet columns.
 honorGuardArchiveColumns = [
@@ -261,11 +264,11 @@ honorGuardExcuseStatusValues = [
 honorGuardBiweeklyQuotaPointsRequired = 4
 honorGuardEarlyActiveQuotaPoints = 8
 honorGuardSoloSentryDutyMinutesRequired = 30
-honorGuardSoloSentryDutyPromotionPoints = 1
+honorGuardSoloSentryDutyEventPoints = 1
 honorGuardAttendanceQuotaPointsByEventType = {
     "gamenight": 0.5,
 }
-honorGuardAttendancePromotionPointsByEventType = {
+honorGuardAttendanceEventPointsByEventType = {
     "drill" : {
         "base": 2,
         "per_intervall": 0,
@@ -281,13 +284,28 @@ honorGuardAttendancePromotionPointsByEventType = {
         "per_intervall": 1,
         "minimum": 0
     },
+    "tryout": {
+        "base": 0,
+        "per_intervall": 1,
+        "minimum": 0
+    },
     "orientation": {
         "base": 0,
         "per_intervall": 1,
         "minimum": 2
     },
+    "jge": {
+        "base": 5,
+        "per_intervall": 0,
+        "minimum": 0
+    },
+    "ncoe": {
+        "base": 5,
+        "per_intervall": 0,
+        "minimum": 0
+    },
 }
-honorGuardHostPromotionPointsByEventType = {
+honorGuardHostEventPointsByEventType = {
     "gamenight": 1,
     "orientation": 2,
     "drill": 3,
@@ -295,7 +313,7 @@ honorGuardHostPromotionPointsByEventType = {
     "tryout": 6,
     "inspection": 8,
 }
-honorGuardSupervisorPromotionPointsByEventType = {
+honorGuardSupervisorEventPointsByEventType = {
     "orientation": {
         "base": 0,
         "per_intervall": 1,
@@ -310,6 +328,8 @@ honorGuardSupervisorPromotionPointsByEventType = {
 honorGuardJgePointsPerGradedAttendee = 0.75
 honorGuardNcoExamPointsPerGradedAttendee = 1.5
 honorGuardNcoExamScreenAssistPoints = 2
+
+honorGuardOrbatAuditChannelId = 0
 
 canCreateVoiceChatAll = [
     1376949984750206986,
