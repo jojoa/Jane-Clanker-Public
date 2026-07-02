@@ -1187,6 +1187,7 @@ async def syncApprovedSubmissionToSheet(submissionId: int, *, configModule: Any)
         eventPlatoon = str(_jsonDict(submission.get("metadataJson")).get("platoon") or "").strip().upper()
         eventType = str(_jsonDict(submission.get("metadataJson")).get("eventType") or "").strip().upper()
         activePlatoons = getattr(configModule, "honorGuardActivePlatoons", [""])
+        passedExam = attendanceRecord.get("examGrade") == "PASS"
         ## Maybe in the future also use a batch writer
         for attendanceRecord in await listHonorGuardAttendees(eventId):
             lookup = await robloxUsers.fetchRobloxUser(
@@ -1200,6 +1201,8 @@ async def syncApprovedSubmissionToSheet(submissionId: int, *, configModule: Any)
                     robloxUsername=targetRobloxUsername,
                     quotaDelta=attendanceRecord.get("quotaPoints") or 0,
                     eventDelta=attendanceRecord.get("eventPoints") ,
+                    passedJGE=eventType == "JGE" and passedExam,
+                    passedNCOE=eventType == "NCOE" and passedExam,
                     platoonDelta=0,
                 )
                 count += 1
