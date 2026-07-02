@@ -598,7 +598,8 @@ class HonorGuardEventReviewView(discord.ui.View):
                         eventHostUpdate: HonorGuardEventHostUpdate = syncResult.get("eventHostUpdate")
                         auditLogs = syncResult.get("auditLogs") or []
                         auditLogs.append("")
-                        auditLogs.append(f"Host: <@{int(submission.get('targetUserId') or 0)}> ({eventHostUpdate.host}) {eventHostUpdate.previousValue} -> {eventHostUpdate.value} hosted Events")
+                        if eventHostUpdate is not None: # my solution
+                            auditLogs.append(f"Host: <@{int(submission.get('targetUserId') or 0)}> ({eventHostUpdate.host}) {eventHostUpdate.previousValue} -> {eventHostUpdate.value} hosted Events") # HERE IT IS
                         await self._logHonorGuardSheetChange(
                             reviewerId=interaction.user.id,
                             requestedBy=requestedBy,

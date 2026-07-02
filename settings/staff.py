@@ -161,8 +161,8 @@ trainingMirrorWebhookName = "Jane Training Log"
 johnEventLogChannelId = 0
 johnClankerBotId = 0
 
-honorGuardEnabled = False
-honorGuardActivePlatoons = []
+honorGuardEnabled = True
+honorGuardActivePlatoons = ["CMP"]
 honorGuardCommandGuildIds = []
 honorGuardReviewChannelId = 0
 honorGuardLogChannelId = 0
@@ -186,6 +186,12 @@ honorGuardMemberSectionHeaders = [
     "Guardsman",
     "RETIRED",
 ]
+honorGuardPlatoonSectionHeaders = [
+    "HR",
+    "MR",
+    "LR",
+    "RETIRED",
+]
 
 # Honor Guard member sheet columns.
 honorGuardDiscordIdColumn = ""
@@ -202,6 +208,12 @@ honorGuardNcoExamPassedColumn = "O"
 honorGuardQuotaCompleteFormulaColumn = "F"
 honorGuardPromotionEligibleFormulaColumn = "P"
 honorGuardStrikesColumn = "Q"
+
+# Honor Guard platoons sheet columns.
+honorGuardPlatoonDiscordIdColumn = ""
+honorGuardPlatoonRobloxUsernameColumn = "A"
+honorGuardPlatoonRankColumn = "B"
+honorGuardPlatoonPointsColumn = "D"
 
 # Honor Guard schedule/archive sheet columns.
 honorGuardArchiveColumns = [
@@ -237,9 +249,9 @@ honorGuardEventHostEventTypeColumns = {
 
 # Honor Guard ranks and point rules.
 honorGuardEnlistedRoleIds = []
-honorGuardNcoRoleIds = []
-honorGuardOfficerRoleIds = []
-honotGuardAllowedRanks = [
+honorGuardNcoRoleIds = [honorGuardSeniorGuardsmanRoleId,honorGuardPlatoonSergeantRoleId]
+honorGuardOfficerRoleIds = honorGuardParadeOfficerPlusRoleIds
+honorGuardAllowedRanks = [
     "Commandant",
     "Deputy Commandant",
     "Oversight",
@@ -252,6 +264,19 @@ honotGuardAllowedRanks = [
     "Guardsman",
     "Junior Guardsman",
 ]
+
+honorGuardPlatoonAllowedRanks = {
+    "cmp": [
+        "Major",
+        "Lieutenant",
+        "Sergeant",
+        "Corporal",
+        "Trooper First Class",
+        "Trooper",
+    ],
+ #  "executive": [],
+ #  "ceremonial": [],
+}
 
 honorGuardExcuseStatusValues = [
     "Excused",

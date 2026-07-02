@@ -465,9 +465,8 @@ class MultiOrbatEngine:
     ) -> None:
         updates: list[dict[str, Any]] = []
         sheetName = self.getSheetName(sheetKey)
-        for row in rows:
-            columnValues = columnValuesByRow.get(row, {})
-            for _, payload in columnValues.items():
+        for row, columnValues in columnValuesByRow.items():
+            for payload in columnValues.values():
                 if not isinstance(payload, tuple) or len(payload) != 2:
                     continue
                 col, rawValue = payload
