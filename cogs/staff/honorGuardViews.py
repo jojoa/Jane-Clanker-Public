@@ -863,14 +863,14 @@ class HonorGuardEventPointsModal(discord.ui.Modal, title="Edit Points"):
             points = float(raw)
             if self.type == "QUOTA":
                 if points % 0.5 != 0:
-                    await interactionRuntime.safeInteractionReply(interaction, "Quota points must be in increments of 0.5.")
+                    await _safeInteractionReply(interaction, "Quota points must be in increments of 0.5.")
                     return
             else:
                 if points % 1 != 0:
-                    await interactionRuntime.safeInteractionReply(interaction, "Event points must be whole numbers.")
+                    await _safeInteractionReply(interaction, "Event points must be whole numbers.")
                     return
         except ValueError:
-            await interactionRuntime.safeInteractionReply(interaction, "Points must be a number.")
+            await _safeInteractionReply(interaction, "Points must be a number.")
             return
         await self.cog.handleEditPoints(interaction, self.eventId, self.user, points, self.type)
         await self.view.updateMessage(self.original_interaction)
@@ -896,7 +896,6 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
         self.durationMinutesInput.placeholder = f"Default: {minutes}"
 
     async def on_timeout(self) -> None:
-        await self.stop()
         await self.cog.timeoutTimeModal(self.eventId)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -904,10 +903,10 @@ class HonorGuardEventFinishModal(discord.ui.Modal, title="Finish Event"):
         try:
             durationMinutes = int(raw)
         except ValueError:
-            await interactionRuntime.safeInteractionReply(interaction, "Duration must be a whole number of minutes.", ephemeral=True)
+            await _safeInteractionReply(interaction, "Duration must be a whole number of minutes.", ephemeral=True)
             return
         if durationMinutes <= 0:
-            await interactionRuntime.safeInteractionReply(interaction, "Duration must be greater than 0 minutes.", ephemeral=True)
+            await _safeInteractionReply(interaction, "Duration must be greater than 0 minutes.", ephemeral=True)
             return
         await self.cog.openSubmitEvent(interaction, self.eventId, durationMinutes)
 

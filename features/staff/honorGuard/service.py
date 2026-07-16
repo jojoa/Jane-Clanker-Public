@@ -1186,73 +1186,30 @@ async def syncApprovedSubmissionToSheet(submissionId: int, *, configModule: Any)
         eventPlatoon = str(_jsonDict(submission.get("metadataJson")).get("platoon") or "").strip().upper()
         eventType = str(_jsonDict(submission.get("metadataJson")).get("eventType") or "").strip().upper()
         activePlatoons = getattr(configModule, "honorGuardActivePlatoons", [""])
+        activePlatoons.append("NONE")
         ## Maybe in the future also use a batch writer
 
         attendees = await listHonorGuardAttendees(eventId)
         updates: list[dict] = []
         
-
+        if eventPlatoon not in activePlatoons:
+            raise ValueError(f"Invalid platoon for Honor Guard event record: {eventPlatoon}")
         for record in attendees:
+            passedExam = str(record.get("examGrade")).upper() == "PASS"
             lookup = await robloxUsers.fetchRobloxUser(
                 int(record.get("userId") or 0),
                 int(submission.get("guildId") or 0),
             )
 
-            if eventPlatoon == "NONE":
-                if eventType == "JGE":
-                    updates.append({
-                        "userId": record["userId"],
-                        "robloxUsername": str(lookup.robloxUsername or "").strip(),
-                        "platoon": eventPlatoon,
-                        "quotaDelta": record.get("quotaPoints", 0),
-                        "eventDelta": record.get("eventPoints", 0),
-                        "awardedDelta": record.get("awardedPoints"),
-                        "juniorExamPassed": str(record.get("examGrade")),
-                        "ncoExamPassed": None,
-                        "platoonDelta": 0,
-                })
-                count += 1
-                if eventType == "NCOE":
-                    updates.append({
-                        "userId": record["userId"],
-                        "robloxUsername": str(lookup.robloxUsername or "").strip(),
-                        "platoon": eventPlatoon,
-                        "quotaDelta": record.get("quotaPoints", 0),
-                        "eventDelta": record.get("eventPoints", 0),
-                        "awardedDelta": record.get("awardedPoints"),
-                        "juniorExamPassed": None,
-                        "ncoExamPassed": str(record.get("examGrade")),
-                        "platoonDelta": 0,
-                    })
-                    count += 1
-                else:
-                    updates.append({
-                        "userId": record["userId"],
-                        "robloxUsername": str(lookup.robloxUsername or "").strip(),
-                        "platoon": eventPlatoon,
-                        "quotaDelta": record.get("quotaPoints", 0),
-                        "eventDelta": record.get("eventPoints", 0),
-                        "awardedDelta": record.get("awardedPoints"),
-                        "juniorExamPassed": None,
-                        "ncoExamPassed": None,
-                        "platoonDelta": 0,
-                    })
-                    count += 1
-
-            else:
-                if eventPlatoon not in activePlatoons:
-                    raise ValueError(f"Invalid platoon for Honor Guard event record: {eventPlatoon}")
-                else:
-                    updates.append({
-                        "userId": record["userId"],
-                        "robloxUsername": str(lookup.robloxUsername or "").strip(),
-                        "platoon": eventPlatoon,
-                        "quotaDelta": record.get("quotaPoints", 0),
-                        "eventDelta": 0,
-                        "platoonDelta": record.get("eventPoints"),
-                    })
-                    count += 1
-        
+            updates.append({
+                "userId": record["userId"],
+                "robloxUsername": str(lookup.robloxUsername or "").strip(),
+                "quotaDelta": record.get("quotaPoints", 0),
+                "eventDelta": record.get("eventPoints", 0),
+                "juniorExamPassed": eventType == "JGE" and passedExam,
+                "ncoExamPassed": eventType == "NCOE" and passedExam,
+            })
+            count += 1
 
         updateResult = honorGuardSheets.applyApprovedLogsBatch(updates=updates, eventPlatoon=eventPlatoon)
 
@@ -1276,19 +1233,19 @@ async def syncApprovedSubmissionToSheet(submissionId: int, *, configModule: Any)
             if eventType == "JGE":
                 for attendee in updateResult:
                     pointUpdate = attendee["pointUpdate"]
-                    auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} event points, Passed JGE: {pointUpdate.passedJGE}, Promotion: {attendee["promotion"]}\n")
+                    auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} event points, Passed JGE: {pointUpdate.passedJGE}, Promotion: {attendee["promotion"]}")
             elif eventType == "NCOE":
                 for attendee in updateResult:
                     pointUpdate = attendee["pointUpdate"]
-                    auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} event points, Passed NCOE: {pointUpdate.passedNCOE}, Promotion: {attendee["promotion"]}\n")
+                    auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} event points, Passed NCOE: {pointUpdate.passedNCOE}, Promotion: {attendee["promotion"]}")
             else:
                 for attendee in updateResult:
                     pointUpdate = attendee["pointUpdate"]
-                    auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} event points, Promotion: {attendee["promotion"]}\n")
+                    auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} event points, Promotion: {attendee["promotion"]}")
         else:
             for attendee in updateResult:
                 pointUpdate = attendee["pointUpdate"]
-                auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} platoon points, {pointUpdate.previousPlatoonPoints} -> {pointUpdate.platoonPoints} platoon points, Promotion: {attendee["promotion"]}  \n")
+                auditLogs.append(f"{_mentionUser(attendee["userId"])} ({pointUpdate.robloxUsername}): {pointUpdate.previousQuotaPoints} -> {pointUpdate.quotaPoints} quota, {pointUpdate.previousEventPoints} -> {pointUpdate.eventPoints} platoon points, {pointUpdate.previousPlatoonPoints} -> {pointUpdate.platoonPoints} platoon points, Promotion: {attendee["promotion"]}")
             
             
     await execute(

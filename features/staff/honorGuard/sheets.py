@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+import json
 from typing import Any, Optional
 import time
 
@@ -105,6 +106,7 @@ class HonorGuardMemberColumnsBatch:
     activityStatus: str
     eventPoints: float
     awardedPoints: float
+    platoonPoints: float
     totalPoints: float
     juniorExamPassed: bool
     ncoExamPassed: bool
@@ -121,11 +123,9 @@ class HonorGuardPlatoonColumnsBatch:
 class ApprovedLogUpdate:
     robloxUsername: str
     discordId: int
-    platoon: str
     quotaDelta: float
     eventDelta: float
     platoonDelta: float
-    awardedDelta: float
     juniorExamPassed: bool | None
     ncoExamPassed: bool | None
 
@@ -138,6 +138,7 @@ class HonorGuardMemberRowBatch:
     quotaPoints: float
     activityStatus: str
     eventPoints: float
+    platoonPoints: float
     awardedPoints: float
     totalPoints: float
     juniorExamPassed: bool
@@ -245,7 +246,7 @@ def isHonorGuardOrbatLabel(value: str) -> bool:
     if not text:
         return False
     normalized = normalize(text)
-    if normalized in {"robloxusername", "robloxuser", "ruser"}:
+    if normalized in {"robloxusername", "robloxuser", "ruser", "username"}:
         return False
     lowered = text.lower()
     if "personnel" in lowered:
@@ -324,6 +325,7 @@ def loadMemberColumnsBatch(*, configModule: Any = config) -> HonorGuardMemberCol
         quotaPoints=_normalizeColumn(getattr(configModule, "honorGuardQuotaPointsColumn", "E")),
         activityStatus=_normalizeColumn(getattr(configModule, "honorGuardActivityStatusColumn", "D")),
         eventPoints=_normalizeColumn(getattr(configModule, "honorGuardEventPointsColumn", "F")),
+        platoonPoints=_normalizeColumn(getattr(configModule, "honorGuardTotalPlatoonPointsColumn", "L")),
         awardedPoints=_normalizeColumn(getattr(configModule, "honorGuardAwardedPointsColumn", "G")),
         totalPoints=_normalizeColumn(getattr(configModule, "honorGuardTotalPointsColumn", "H")),
         juniorExamPassed=_normalizeColumn(getattr(configModule, "honorGuardJuniorExamPassedColumn", "J")),
@@ -693,7 +695,64 @@ def memberSheetLastConfiguredColumn(*, configModule: Any = config) -> str:
     indexes = [columnIndex(col) for col in _columnMap(columns).values() if col]
     return indexToColumn(max(indexes, default=1))
 
-def _aggregateApprovedLogUpdates(updates: list[dict]) -> dict[str, ApprovedLogUpdate]:
+
+def _loadWritableMemberRowsByUsername(columns, sheetKey: str) -> dict[str, int]:
+    usernameCol = columns.robloxUsername
+    rankCol = columns.rank
+    cacheKey = (sheetKey, _sheetName(sheetKey), str(usernameCol).upper(), str(rankCol).upper())
+    ttlSec = _rowLookupCacheTtlSec()
+    now = time.monotonic()
+    cached = _rowLookupCache.get(cacheKey)
+    if cached and ttlSec > 0 and (now - cached[0]) <= ttlSec:
+        return dict(cached[1])
+
+    usernameAndRank = _engine.batchGetValues(
+        sheetKey,
+        [
+            f"{_sheetName(sheetKey)}!{usernameCol}:{usernameCol}",
+            f"{_sheetName(sheetKey)}!{rankCol}:{rankCol}",
+        ]
+    )
+
+    usernames = usernameAndRank[0].get("values", []) if len(usernameAndRank) > 0 else []
+    ranks = usernameAndRank[1].get("values", []) if len(usernameAndRank) > 1 else []
+    rowByUsername: dict[str, int] = {}
+    totalRows = max(len(usernames), len(ranks))
+    for idx in range(1, totalRows + 1):
+        usernameRow = usernames[idx - 1] if idx - 1 < len(usernames) else []
+        rankRow = ranks[idx - 1] if idx - 1 < len(ranks) else []
+        usernameCell = usernameRow[0] if usernameRow else ""
+        rankCell = str(rankRow[0]).strip() if rankRow else ""
+        if not _isWritableMemberRow(usernameCell, rankCell) if sheetKey == _memberSheetKey else _isWritablePlatoonRow(usernameCell, rankCell, sheetKey):
+            continue
+        rowByUsername[usernameCell.casefold()] = idx
+    if ttlSec > 0:
+        _rowLookupCache[cacheKey] = (now, dict(rowByUsername))
+    return dict(rowByUsername)
+
+def _resolveApprovedLogRows(
+    aggregate: dict[str, dict[str, int | str]],
+    rowByUsername: dict[str, int],
+    platoonRowByUsername: dict[str, int] = None,
+) -> list[dict[int, dict[str, int | str]]|list[str]]:
+    updatesByRow: dict[int, dict[str, int | str]] = {}
+    platoonUpdatesByRow: dict[int, dict[str, int | str]] = {}
+    errors: list[str] = []
+    for key, entry in aggregate.items():
+        row = rowByUsername.get(key)
+        if not row:
+            errors.append(f"Members: {key}")
+            continue
+        updatesByRow[row] = entry
+        if platoonRowByUsername is not None:
+            platoonRow = platoonRowByUsername.get(key)
+            if not platoonRow:
+                errors.append(f"Platoon: {key}")
+                continue
+            platoonUpdatesByRow[platoonRow] = entry
+    return updatesByRow, platoonUpdatesByRow, errors
+
+def _aggregateApprovedLogUpdates(updates: list[dict], platoon: str) -> dict[str, ApprovedLogUpdate]:
     aggregate: dict[str, ApprovedLogUpdate] = {}
     for raw in updates:
         if not isinstance(raw, dict):
@@ -704,17 +763,13 @@ def _aggregateApprovedLogUpdates(updates: list[dict]) -> dict[str, ApprovedLogUp
         discordId = int(raw.get("userId") or 0)
         if not discordId:
             continue
-        if str(raw.get("platoon") or "NONE") != "NONE":
+        if platoon != "NONE":
+            eventDelta = 0
             try:
-                platoon = str(raw.get("platoon") or "NONE").strip().upper()
-            except (TypeError, ValueError):
-                platoon = None
-            try:
-                platoonDelta = float(raw.get("platoonDelta") or 0)
+                platoonDelta = float(raw.get("eventDelta") or 0)
             except (TypeError, ValueError):
                 platoonDelta = 0
         else:
-            platoon = "NONE"
             platoonDelta = 0
             try:
                 eventDelta = float(raw.get("eventDelta") or 0)
@@ -724,26 +779,18 @@ def _aggregateApprovedLogUpdates(updates: list[dict]) -> dict[str, ApprovedLogUp
             quotaDelta = float(raw.get("quotaDelta") or 0)
         except (TypeError, ValueError):
             quotaDelta = 0
-        try:
-            eventDelta = float(raw.get("eventDelta") or 0)
-        except (TypeError, ValueError):
-            eventDelta = 0
-        try: 
-            awardedDelta = float(raw.get("awardedDelta"))
-        except (TypeError, ValueError):
-            awardedDelta = 0
         if raw.get("juniorExamPassed") is None:
             juniorExamPassed = None
         else:
             try:
-                juniorExamPassed = str(raw.get("juniorExamPassed", "")).upper() == 'PASS'
+                juniorExamPassed = bool(raw.get("juniorExamPassed", False))
             except (TypeError, ValueError):
                 juniorExamPassed = None
         if raw.get("ncoExamPassed") is None:
             ncoExamPassed = None
         else:
             try:
-                ncoExamPassed = str(raw.get("ncoExamPassed", "")).upper() == 'PASS'
+                ncoExamPassed = bool(raw.get("ncoExamPassed", False))
             except (TypeError, ValueError):
                 ncoExamPassed = None
 
@@ -753,11 +800,9 @@ def _aggregateApprovedLogUpdates(updates: list[dict]) -> dict[str, ApprovedLogUp
             aggregate[key] = ApprovedLogUpdate(
                 robloxUsername = username,
                 discordId = discordId,
-                platoon = platoon,
                 quotaDelta = quotaDelta,
                 eventDelta = eventDelta,
                 platoonDelta = platoonDelta,
-                awardedDelta = awardedDelta,
                 juniorExamPassed = juniorExamPassed,
                 ncoExamPassed = ncoExamPassed,
             )
@@ -765,127 +810,109 @@ def _aggregateApprovedLogUpdates(updates: list[dict]) -> dict[str, ApprovedLogUp
             slot.quotaDelta += quotaDelta
             slot.eventDelta += eventDelta
             slot.platoonDelta += platoonDelta
-            slot.awardedDelta += awardedDelta
             if juniorExamPassed:
                 slot.juniorExamPassed = True
             if ncoExamPassed:
                 slot.ncoExamPassed = True
     return aggregate
 
+def _loadApprovedLogCurrentRows(
+    sheetId: str,
+    rows: list[int],
+    columns: dataclass,
+) -> dict[int, dict[str, str]]:
+    perRowRanges: list[str] = []
+    rangeMeta: list[tuple[int, str]] = []
+    for row in rows:
+        for column in fields(columns):
+            value = getattr(columns, column.name)
+            if not value or value == "":
+                continue
+            perRowRanges.append(_range(sheetId, getattr(columns, column.name), row))
+            rangeMeta.append((row, column.name))
+    fetchedRanges = _engine.batchGetValues(sheetId, perRowRanges)
+    currentByRow: dict[int, dict[str, str]] = {}
+    for idx, (row, key) in enumerate(rangeMeta):
+        values = fetchedRanges[idx].get("values", []) if idx < len(fetchedRanges) else []
+        value = values[0][0] if values and values[0] else ""
+        rowData = currentByRow.setdefault(row, {})
+        rowData[key] = str(value)
+    return currentByRow
+
 def _loadOrbatData(
         platoon: str,
+        memberIds: list[int],
         *,
         configModule: Any = config,
     ) -> dict[str, HonorGuardMemberRowBatch]:
     columns = loadMemberColumnsBatch(configModule=configModule)
     platoonColumns = loadPlatoonColumnsBatch(configModule=configModule)
 
-    rangesAll = [
-        f"{_sheetName(_memberSheetKey)}!{columns.robloxUsername}:{columns.promotionEligible}",
-    ]
-    if platoon.strip().upper() != "NONE":
-        sheetKey = f"honorGuard_platoon_{_normalizeKey(platoon)}"
-        sheetName = _sheetName(sheetKey)
-        rangesAllPlatoon = (
-            f"{sheetName}!{platoonColumns.robloxUsername}:{platoonColumns.platoonPoints}"
-        )
-
-    rawOrbatData = _engine.batchGetValues(_memberSheetKey, rangesAll)
-    unpackedMemberData = rawOrbatData[0]["values"]
+    rawOrbatData = _loadApprovedLogCurrentRows(_memberSheetKey, memberIds, columns)
+    
     orbatData: dict[str, HonorGuardMemberRowBatch] = {}
     platoonData: dict[str, HonorGuardPlatoonRowBatch] = {}
-    if platoon != "NONE":
-        rawPlatoonData = _engine.batchGetValues(sheetKey, rangesAllPlatoon)
-        unpackedPlatoonData = rawPlatoonData[0]["values"]
 
-    for rowNumber, row in enumerate(unpackedMemberData, start=1):
-        username = str(row[0]).strip() if len(row) > 0 else ""
-        rank = str(row[1]).strip() if len(row) > 1 else ""
 
-        if not _isWritableMemberRow(username, rank):
-            continue
+    for i, rowNumber in enumerate(rawOrbatData, start=1):
+        row = rawOrbatData.get(rowNumber)
+        username = str(row.get("robloxUsername")).strip()
+        rank = str(row.get("rank")).strip()
 
         orbatData[username.casefold()] = HonorGuardMemberRowBatch(
             row = rowNumber,
             discordId=0,
             robloxUsername=username,
             rank = rank,
-            quotaPoints = _toFloat(row[4]) if len(row) > 4 else 0.0,
-            activityStatus = str(row[6]).strip() if len(row) >= 6 else 'Inactive',
-            eventPoints = _toFloat(row[9]) if len(row) > 9 else 0.0,
-            awardedPoints = _toFloat(row[10]) if len(row) > 10 else 0.0,
-            totalPoints = _toFloat(row[12]) if len(row) > 12 else 0.0,
-            juniorExamPassed = _toBool(row[13]) if len(row) > 13 else False,
-            ncoExamPassed = _toBool(row[14]) if len(row) > 14 else False,
-            promotionEligible = _toBool(row[15]) if len(row) > 15 else False,
+            quotaPoints = _toFloat(row.get("quotaPoints", 0.0)),
+            activityStatus = str(row.get("activityStatus", 'Inactive')).strip(),
+            eventPoints = _toFloat(row.get("eventPoints", 0.0)),
+            awardedPoints = _toFloat(row.get("awardedPoints", 0.0)),
+            totalPoints = _toFloat(row.get("totalPoints", 0.0)),
+            platoonPoints = _toFloat(row.get("platoonPoints", 0.0)),
+            juniorExamPassed = _toBool(row.get("juniorExamPassed", False)),
+            ncoExamPassed = _toBool(row.get("ncoExamPassed", False)),
+            promotionEligible = _toBool(row.get("promotionEligible", False)),
         )
 
 
     if platoon != "NONE":
-        for rowNumber, row in enumerate(unpackedPlatoonData, start=1):
-            username = str(row[0]).strip() if len(row) > 0 else ""
-            rank = str(row[1]).strip() if len(row) > 1 else ""
-            
-            if not _isWritablePlatoonRow(username, rank, platoon):
-                continue
+        sheetKey = f"honorGuard_platoon_{_normalizeKey(platoon)}"
+        rawPlatoonData = _loadApprovedLogCurrentRows(sheetKey, memberIds, platoonColumns)
+        for rowNumber, row in enumerate(rawPlatoonData, start=1):
+            username = str(row.get("robloxUsername")).strip()
+            rank = str(row.get("rank")).strip()
 
             platoonData[username.casefold()] = HonorGuardPlatoonRowBatch(
                 row = rowNumber,
                 discordId = 0,
                 robloxUsername=username,
                 rank = rank,
-                platoonPoints = _toFloat(row[3]) if len(row) > 3 else 0.0,
+                platoonPoints = _toFloat(row.get("platoonPoints", 0.0)),
             )
     return orbatData, platoonData
-
-def _resolveApprovedLogRows(
-    aggregate: dict[str, ApprovedLogUpdate],
-    orbatMembers: dict[str, HonorGuardMemberRowBatch],
-    orbatPlatoon: dict[str, HonorGuardPlatoonRowBatch] | None = None,
-) -> tuple[dict[int, MemberResolvedUpdate], dict[int, PlatoonResolvedUpdate]]:
-    updatesByRowPlatoon: dict[int, PlatoonResolvedUpdate] = {}
-    updatesByRowMember: dict[int, MemberResolvedUpdate] = {}
-    for username, update in aggregate.items():
-        member = orbatMembers.get(username)
-        if member is None:
-            print(f"ERROR | Username {username} not found in orbat.")
-            continue
-        updatesByRowMember[member.row] = MemberResolvedUpdate(
-            member = member,
-            update = update,
-        )
-        if orbatPlatoon is not None and update.platoonDelta != 0:
-            platoonMember = orbatPlatoon.get(username)
-            if platoonMember is None:
-                print(f"ERROR | Username {username} not found in platoon orbat.")
-                continue
-            updatesByRowPlatoon[platoonMember.row] = PlatoonResolvedUpdate(
-                platoon=platoonMember,
-                update=update,
-            )
-
-    return updatesByRowMember, updatesByRowPlatoon
 
 def _buildApprovedLogBatchData(
     columns: HonorGuardMemberColumnsBatch,
     platoonColumns: HonorGuardPlatoonColumnsBatch,
-    updatesByRowMember: dict[int, MemberResolvedUpdate],
-    updatesByRowPlatoon: dict[int, PlatoonResolvedUpdate],
-    eventPlatoon,
+    updatesByRowMember: dict[int, ApprovedLogUpdate],
+    updatesByRowPlatoon: dict[int, ApprovedLogUpdate],
+    memberRows: dict[str, HonorGuardMemberRowBatch],
+    platoonRows: dict[str, HonorGuardPlatoonRowBatch] | None = None,
 ) -> tuple[list[dict], list[int], list[dict], list[int], list[int, dict]]:
     batchDataMember: dict[int, dict[str, tuple[str, Any]]] = {}
     touchedRowsMember: list[int] = []
     batchDataPlatoon: dict[int, dict[str, tuple[str, Any]]] = {}
     touchedRowsPlatoon: list[int] = []
-    for row, resolved in updatesByRowMember.items():
-        member, update = resolved.member, resolved.update
+    for row, update in updatesByRowMember.items():
+        member = memberRows.get(update.robloxUsername.casefold())
 
         nextRank = None
         nextActivityStatus = None
-        nextTotalPoints = member.totalPoints + max(0,update.awardedDelta) + max(0,update.eventDelta) + max(0,update.platoonDelta)
+        nextTotalPoints = member.totalPoints + max(0,update.eventDelta) + max(0,update.platoonDelta)
         nextQuotaPoints = member.quotaPoints + max(0, update.quotaDelta)
         nextEventPoints = member.eventPoints + max(0, update.eventDelta)
-        nextAwardedPoints = member.awardedPoints + max(0, update.awardedDelta)
+        nextPlatoonPoints = member.platoonPoints + max(0, update.platoonDelta)
         nextJuniorExamPassed = None
         nextNcoExamPassed = None
         nextPromotionEligible = None
@@ -898,6 +925,7 @@ def _buildApprovedLogBatchData(
             nextNcoExamPassed = True
         if member.rank == "Junior Guardsman" and nextTotalPoints >= 15 and (member.juniorExamPassed or nextJuniorExamPassed):
             nextRank = "Guardsman"
+            nextPromotionEligible = True
         if member.rank == "Guardsman" and nextTotalPoints >= 50 and (member.ncoExamPassed or nextNcoExamPassed) and (member.activityStatus == 'Active' or nextActivityStatus == 'Active'):
             nextPromotionEligible = True
         if member.rank == "Junior Guardsman" and nextTotalPoints >= 50 and (member.ncoExamPassed or nextNcoExamPassed) and (member.juniorExamPassed or nextJuniorExamPassed) and (member.activityStatus == 'Active' or nextActivityStatus == 'Active'):
@@ -905,16 +933,15 @@ def _buildApprovedLogBatchData(
             nextPromotionEligible = True
 
         rowData = {}
-        if nextRank is not None:
-            rowData["rank"] = (columns.rank, nextRank)
+        # if nextRank is not None:
+        #     rowData["rank"] = (columns.rank, nextRank)
         if update.quotaDelta != 0:
             rowData["quotaPoints"] = (columns.quotaPoints, nextQuotaPoints)
         if nextActivityStatus is not None:
             rowData["activityStatus"] = (columns.activityStatus, nextActivityStatus)
         if update.eventDelta != 0:
             rowData["eventPoints"] = (columns.eventPoints, nextEventPoints)
-        if update.awardedDelta != 0:
-            rowData["awardedPoints"] = (columns.awardedPoints, nextAwardedPoints)
+        rowData["platoonPoints"] = (columns.platoonPoints, nextPlatoonPoints)
         if nextJuniorExamPassed is not None:
             rowData["juniorExamPassed"] = (columns.juniorExamPassed, nextJuniorExamPassed)
         if nextNcoExamPassed is not None:
@@ -926,8 +953,8 @@ def _buildApprovedLogBatchData(
 
         touchedRowsMember.append(row)
 
-    for row, resolved in updatesByRowPlatoon.items():
-        platoon, update = resolved.platoon, resolved.update
+    for row, update in updatesByRowPlatoon.items():
+        platoon = platoonRows.get(update.platoon.casefold())
         nextPlatoonPoints = platoon.platoonPoints + max(0, update.platoonDelta)
 
         rowData = {}
@@ -954,8 +981,11 @@ def applyApprovedLogsBatch(
 
     columns = loadMemberColumnsBatch(configModule=configModule)
     platoonColumns = loadPlatoonColumnsBatch(configModule=configModule)
+    rowByUsername = _loadWritableMemberRowsByUsername(columns, _memberSheetKey)
+    platoonRowByUsername = _loadWritableMemberRowsByUsername(platoonColumns, f"honorGuard_platoon_{_normalizeKey(eventPlatoon)}") if eventPlatoon != "NONE" else None
 
-    aggregate = _aggregateApprovedLogUpdates(updates)
+
+    aggregate = _aggregateApprovedLogUpdates(updates, eventPlatoon)
     if not aggregate:
         return
 
@@ -966,16 +996,21 @@ def applyApprovedLogsBatch(
         )
         return
 
-    orbatMembers, orbatPlatoon = _loadOrbatData(eventPlatoon)
-
-    updatesByRowMember, updatesByRowPlatoon = _resolveApprovedLogRows(aggregate, orbatMembers, orbatPlatoon)
+    updatesByRowMember, updatesByRowPlatoon, errors = _resolveApprovedLogRows(aggregate, rowByUsername, platoonRowByUsername)
+    if len(errors) > 0:
+        auditLog.append(
+            {"error": f"_resolveApprovedLogRows() failed for {len(errors)} members: {errors}"}
+        )
     if not updatesByRowMember:
         auditLog.append(
             {"error": "_resolveApprovedLogRows() failed."}
         )
         return auditLog
+    rows = sorted(updatesByRowMember.keys())
 
-    batchDataMember, touchedRowsMember, batchDataPlatoon, touchedRowsPlatoon = _buildApprovedLogBatchData(columns, platoonColumns, updatesByRowMember, updatesByRowPlatoon, eventPlatoon)
+    orbatMembers, orbatPlatoon = _loadOrbatData(eventPlatoon, rows, configModule=configModule)
+
+    batchDataMember, touchedRowsMember, batchDataPlatoon, touchedRowsPlatoon = _buildApprovedLogBatchData(columns, platoonColumns, updatesByRowMember, updatesByRowPlatoon, orbatMembers, orbatPlatoon)
 
     _engine.writeRowsColumnsBatch(_memberSheetKey, rows=touchedRowsMember, columnValuesByRow=batchDataMember)
     if len(touchedRowsPlatoon) > 0:
@@ -988,16 +1023,15 @@ def applyApprovedLogsBatch(
     }
 
     for row, rowData in batchDataMember.items():
-        resolved = updatesByRowMember[row]
+        update = updatesByRowMember[row]
 
-        member = resolved.member
-        update = resolved.update
+        member = orbatMembers.get(update.robloxUsername.casefold())
 
         attendeePlatoon = platoonByUsername.get(member.robloxUsername.casefold())
-        platoonMember = attendeePlatoon.platoon if attendeePlatoon else None
+        platoonMember = orbatPlatoon.get(member.robloxUsername.casefold()) if attendeePlatoon is not None else None
 
-        nextRank = rowData.get("rank", (None, member.rank))[1]
-        nextTotalPoints = member.totalPoints + update.awardedDelta + update.eventDelta + update.platoonDelta
+        #nextRank = rowData.get("rank", (None, member.rank))[1]
+        nextTotalPoints = member.totalPoints + update.eventDelta + update.platoonDelta
         if member.activityStatus == "Inactive" and member.quotaPoints + update.quotaDelta >= 8:
             nextActivityStatus = "Active"
         else:
@@ -1006,21 +1040,19 @@ def applyApprovedLogsBatch(
             "promotionEligible",
             (None, member.promotionEligible),
         )[1]
-        nextJuniorExamPassed = rowData.get(
-            "juniorExamPassed", (None, member.juniorExamPassed),
-        )[1]
-        nextNcoExamPassed = rowData.get(
-            "ncoExamPassed", (None, member.ncoExamPassed),
-        )[1]
+        # nextJuniorExamPassed = rowData.get(
+        #     "juniorExamPassed", (None, member.juniorExamPassed),
+        # )[1]
+        # nextNcoExamPassed = rowData.get(
+        #     "ncoExamPassed", (None, member.ncoExamPassed),
+        # )[1]
         promotion = None
 
-        if member.rank != nextRank:
-            promotion = f"Promoted to {nextRank}"
-            if nextRank == "Guardsman" and nextActivityStatus == "Active" and nextTotalPoints >= 50 and nextJuniorExamPassed and nextNcoExamPassed:
-                promotion = f"Promoted to {nextRank}, Eligible for SGM"
-        elif nextPromotionEligible:
-            promotion = "Eligible for SGM"
-        
+        if nextPromotionEligible:
+            if member.rank == "Junior Guardsman":
+                promotion = "Eligible for Promotion to Guardsman"
+            elif member.rank == "Guardsman":
+                promotion = "Eligible for Promotion to Senior Guardsman"
 
         auditLog.append({
             "error": None,
@@ -1036,7 +1068,7 @@ def applyApprovedLogsBatch(
                 previousPlatoonPoints=platoonMember.platoonPoints if platoonMember else 0,
                 platoonPoints=(platoonMember.platoonPoints + update.platoonDelta) if platoonMember else 0,
                 previousAwardedPoints=member.awardedPoints,
-                awardedPoints=member.awardedPoints + update.awardedDelta,
+                awardedPoints=member.awardedPoints,
                 previousTotalPoints=member.totalPoints,
                 totalPoints=nextTotalPoints,
                 activityStatus=nextActivityStatus,
